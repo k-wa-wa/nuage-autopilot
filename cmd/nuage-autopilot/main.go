@@ -1,9 +1,9 @@
 // Command nuage-autopilot は GitHub Issue/PR を起点にアプリ開発を自動化する
 // nuage-autopilot の実行バイナリである。詳細は autopilot/DESIGN.md を参照。
 //
-// Phase 1 の時点では GitHub 連携も LLM CLI の起動も行わない。1 回の起動につき
-// 「対象リポジトリ名・stateDir・起動時刻」を journald 向けに構造化ログ出力して
-// 正常終了するのみである。
+// Phase 2 の時点では GitHub 連携（Issue/PR 取得・ラベル判定・LLM を要しない遷移）
+// までを行う。LLM CLI (claude/agy) の起動は Phase 3 で internal/cycle の
+// executeLLMPhase を差し替えることで実装する。
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/config"
 	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/cycle"
+	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で上書きされる想定の値である。
@@ -46,7 +47,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	logger := slog.New(slog.NewJSONHandler(stdout, nil))
 
-	result, err := cycle.Run(context.Background(), cfg.Repo, cfg.StateDir)
+	// secrets.env は手作業で配置する運用のため、未配置の状態がありうる。
+	// これを failed 扱いにするとタイマー実行のたびに service が失敗して
+	// 通知が埋もれるため、警告を残して正常終了する（DESIGN.md 10.5 節）。
+	if missing := config.MissingEnv(); len(missing) > 0 {
+		logger.Warn("required environment variables are not set; skipping this cycle",
+			"repo", cfg.Repo,
+			"missing", missing,
+			"hint", "/var/lib/nuage-autopilot/secrets.env に値を配置する",
+		)
+		return 0
+	}
+
+	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
+
+	result, err := cycle.Run(context.Background(), logger, client, cfg.Repo, cfg.StateDir)
 	if err != nil {
 		logger.Error("cycle failed", "repo", cfg.Repo, "error", err.Error())
 		return 1
@@ -56,8 +71,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"repo", result.Repo,
 		"state_dir", result.StateDir,
 		"started_at", result.StartedAt,
+		"action", result.Action,
 		"version", version,
 	)
 
 	return 0
+}
+
+// githubClientOptions は internal/github.Client の生成オプションを組み立てる。
+//
+// NUAGE_GITHUB_API_BASE_URL は本番運用では未設定のままでよい内部フックである。
+// 実際の GitHub API に到達させたくない結合テスト（main_test.go）やベース URL の
+// 差し替えが必要な GitHub Enterprise 運用のために用意している。
+func githubClientOptions() []github.Option {
+	var opts []github.Option
+	if baseURL := os.Getenv("NUAGE_GITHUB_API_BASE_URL"); baseURL != "" {
+		opts = append(opts, github.WithBaseURL(baseURL))
+	}
+	return opts
 }

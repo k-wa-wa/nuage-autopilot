@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -33,7 +35,23 @@ func TestRun_MissingRepo(t *testing.T) {
 }
 
 func TestRun_RepoLogsCycleCompletion(t *testing.T) {
+	// このテストは実際の GitHub API には一切到達しない。cycle.Run は internal/github
+	// 経由で GitHub REST API を呼び出すため、main の統合テストとして成立させるには
+	// httptest.Server を立て、NUAGE_GITHUB_API_BASE_URL で参照先を差し替える。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues", "/repos/k-wa-wa/pechka/pulls":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
 	t.Setenv("NUAGE_STATE_DIR", "/tmp/nuage-autopilot-test")
+	t.Setenv("NUAGE_GITHUB_API_BASE_URL", server.URL)
+	t.Setenv("GH_TOKEN", "test-token")
 
 	var stdout, stderr bytes.Buffer
 

@@ -207,6 +207,51 @@ dev-server から `*.cluster.wpc` を解決できる必要がある
 Alertmanager の webhook receiver を生やし、アラートから Issue を自動起票する。
 Holmes を廃止したうえで、この経路に置き換える。
 
+## 10.5 シークレットの取り扱い
+
+GitHub / Claude / Antigravity のトークンは **SOPS で配布しない**。
+流出時の影響が大きいため、VM 起動後に手作業で配置する運用とする。
+
+- 配置先: `/var/lib/nuage-autopilot/secrets.env`（`root:root` / `0600`）
+- 参照方法: systemd の `EnvironmentFile`。先頭に `-` を付けるため、
+  ファイルが存在しなくてもサービスは起動に失敗しない
+- テンプレート: [`secrets.env.example`](./secrets.env.example)
+- 書式は systemd の EnvironmentFile であり、シェルスクリプトではない
+  （`export` を書かない、変数展開が効かない）
+
+| 変数 | 用途 | 必要フェーズ |
+| :-- | :-- | :-- |
+| `GH_TOKEN` | gh CLI / GitHub API / git push の認証 | Phase 2 |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | 生成コミットの名義。committer にも同じ値を使う | Phase 3 |
+
+`secrets.env` は誤コミットを防ぐためリポジトリの `.gitignore` に登録する。
+
+### LLM CLI の認証は環境変数で渡さない
+
+`claude` / `agy` は CLI の TUI でサインインし、認証情報を**実行ユーザーの HOME**
+（`~/.claude` 等）に保存する。したがって API キーを `secrets.env` に置く必要はない。
+
+代わりに、**人間がサインインするユーザーとサービスの実行ユーザーを一致させる**必要がある。
+`services.nuage-autopilot.user`（既定 `nixos`）が `User=` に設定され、systemd が
+passwd から `HOME` を設定する。root で動かすと、SSH でログインしてサインインした
+ユーザーの認証情報を読めない。
+
+サインインは VM 上で 1 回だけ行う。
+
+```bash
+ssh nixos@192.168.5.241
+claude   # TUI でサインイン
+```
+
+### 必須環境変数が未設定のときの挙動
+
+`secrets.env` は手作業で配置する運用のため、VM 作成直後は存在しない。
+この状態を異常終了として扱うとタイマー実行のたびに service が failed になり、
+本当の障害が埋もれる。そのため **警告ログを出して正常終了する**（終了コード 0）。
+
+`EnvironmentFile` に `-` を付けてファイル不在を許容している設計と整合させた判断である。
+必須変数は `internal/config` の `RequiredEnvVars` に定義する。
+
 ## 11. dev-server 側の必要変更（別タスク）
 
 `nuage-cluster` リポジトリ側で行う。本タスクの範囲外だが、設計上の前提として記録する。

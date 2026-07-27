@@ -44,3 +44,22 @@ func TestParse_StateDirFromEnv(t *testing.T) {
 		t.Fatalf("cfg.StateDir = %q, want %q", cfg.StateDir, "/tmp/nuage-autopilot-test")
 	}
 }
+
+func TestMissingEnv_ReportsUnsetRequiredVars(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+
+	missing := MissingEnv()
+	if len(missing) != 1 || missing[0] != "GH_TOKEN" {
+		t.Fatalf("GH_TOKEN が未設定のときは報告されるべきである: got %v", missing)
+	}
+}
+
+func TestMissingEnv_EmptyWhenAllSet(t *testing.T) {
+	for _, name := range RequiredEnvVars {
+		t.Setenv(name, "dummy")
+	}
+
+	if missing := MissingEnv(); missing != nil {
+		t.Fatalf("すべて設定済みのときは nil を返すべきである: got %v", missing)
+	}
+}
