@@ -144,6 +144,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("runner: attach stderr pipe: %w", err)
 	}
 
+	cmd.WaitDelay = 2 * time.Second
+
 	started := time.Now()
 	if err := cmd.Start(); err != nil {
 		return Result{}, fmt.Errorf("runner: start %s: %w", command, err)
@@ -162,9 +164,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		defer wg.Done()
 		streamToLog(logger, "stderr", stderr)
 	}()
-	wg.Wait()
 
 	waitErr := cmd.Wait()
+	wg.Wait()
 	duration := time.Since(started)
 
 	result := Result{Duration: duration, Stdout: strings.Join(stdoutLines, "\n")}
