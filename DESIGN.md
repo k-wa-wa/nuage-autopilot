@@ -102,6 +102,7 @@ GitHub API は `net/http` で直接叩き、git 操作と認証は `git` / `gh` 
 | `repositories` | listOf str | `[]` | 対象リポジトリ (`"k-wa-wa/pechka"` 形式) |
 | `stateDir` | str | `/var/lib/nuage-autopilot` | 作業ディレクトリ |
 | `interval` | str | `"*:0/5"` | systemd `OnCalendar` |
+| `enableTimer` | bool | `true` | 定期実行の有無。`false` でも service unit は生成されるため `systemctl start` で手動実行できる。導入直後の目視確認用 |
 | `environmentFile` | str | `"-/var/lib/nuage-autopilot/secrets.env"` | secret の注入元 |
 | `timeout` | str | `"30m"` | 1 サイクルの `TimeoutStartSec` |
 | `user` | str | `"nixos"` | サービスの実行ユーザー。claude の認証情報を置く HOME の持ち主と一致させる |
