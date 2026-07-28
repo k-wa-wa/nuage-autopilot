@@ -75,6 +75,10 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/user":
 		_ = json.NewEncoder(w).Encode(map[string]string{"login": m.login})
 		return
+	case r.Method == http.MethodPost && r.URL.Path == "/repos/k-wa-wa/pechka/labels":
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{}`))
+		return
 	}
 
 	// /repos/k-wa-wa/pechka/issues/{number}/comments

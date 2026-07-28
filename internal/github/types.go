@@ -146,3 +146,20 @@ func (r rawComment) toComment() Comment {
 		CreatedAt: r.CreatedAt,
 	}
 }
+
+type rawReview struct {
+	ID          int64     `json:"id"`
+	Body        string    `json:"body"`
+	State       string    `json:"state"`
+	User        Author    `json:"user"`
+	SubmittedAt time.Time `json:"submitted_at"`
+}
+
+func (r rawReview) toComment() Comment {
+	return Comment{
+		ID:        r.ID,
+		Body:      r.Body,
+		User:      r.User,
+		CreatedAt: r.SubmittedAt,
+	}
+}

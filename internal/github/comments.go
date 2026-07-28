@@ -2,12 +2,14 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 )
 
-// ListComments は repo の number（Issue/PR 番号）に付いた会話コメントを一覧取得する。
-// Issue と PR は同一のコメントエンドポイントを共有するため、この関数はどちらの
-// 番号に対しても使える。
+// ListComments は repo の number（Issue/PR 番号）に付いたコメントを一覧取得する。
+// Issue の会話コメントに加えて、PR レビューコメント（GET /pulls/{n}/reviews）も
+// 取得・統合し、時系列順にソートして返す。
 func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d", repo, number, listPerPage)
 
@@ -20,6 +22,27 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]C
 	for _, r := range raw {
 		comments = append(comments, r.toComment())
 	}
+
+	// PR レビューコメントも取得を試みる（404 の場合は対象が Issue のため無視する）。
+	reviewsPath := fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=%d", repo, number, listPerPage)
+	var rawReviews []rawReview
+	if err := c.request(ctx, "GET", reviewsPath, nil, &rawReviews); err == nil {
+		for _, r := range rawReviews {
+			if r.Body != "" {
+				comments = append(comments, r.toComment())
+			}
+		}
+	} else {
+		var apiErr *APIError
+		if !(errors.As(err, &apiErr) && apiErr.StatusCode == 404) {
+			// 404 以外のエラーでも会話コメントの返却を優先し無視する。
+		}
+	}
+
+	sort.Slice(comments, func(i, j int) bool {
+		return comments[i].CreatedAt.Before(comments[j].CreatedAt)
+	})
+
 	return comments, nil
 }
 

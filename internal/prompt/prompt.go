@@ -18,6 +18,8 @@
 //     （awaitingUserReviewNote 参照）。
 package prompt
 
+import "fmt"
+
 // Kind は Build 対象が Issue か PullRequest かを表す。
 // internal/cycle の itemKind と同じ値集合を持つが、prompt パッケージが cycle パッケージに
 // 依存する（import する）ことを避けるため独立した型として定義している。
@@ -59,11 +61,16 @@ const repoRulesNote = `対象リポジトリのルート直下に AGENTS.md が�
 // プロンプト内で gh を叩いて付与する」に対応する。4 種類すべての worker プロンプトに
 // 含める。
 //
-// 「解除は人間が行い、コメントの投稿による自動解除は行わない」という設計
-// （DESIGN.md 8章）のため、このラベルを付けたらそのアイテムには人間がラベルを
-// 外すまで再び worker が起動しないことも明記し、中途半端な判断で付けないよう
-// 注意を促している。
-const awaitingUserReviewNote = `## 人間の判断が必要な場合
+// gh issue edit / gh pr edit は番号を種別付きで解決するため、ctx.Kind に応じた
+// 正しいコマンドを生成する。
+func awaitingUserReviewNote(ctx Context) string {
+	cmd := fmt.Sprintf("gh issue edit %d --add-label \"agent:awaiting_user_review\"", ctx.Number)
+	if ctx.Kind == KindPullRequest {
+		cmd = fmt.Sprintf("gh pr edit %d --add-label \"agent:awaiting_user_review\"", ctx.Number)
+	}
+
+	return fmt.Sprintf(`## 人間の判断が必要な場合
 要件があいまいで確認が必要、あるいは自律的に判断してよい範囲を超える意思決定が必要になった場合は、作業を中断し、以下のコマンドで「agent:awaiting_user_review」ラベルを付与したうえで、その理由をコメントで説明すること。
-コマンド: 「gh issue edit <対象番号> --add-label "agent:awaiting_user_review"」（対象が Pull Request の場合も番号を PR 番号に読み替えて同じコマンドでよい。GitHub API 上、ラベル操作は Issue と PR で共通のため）
-このラベルは人間が手動で外すまで解除されない。ラベルを外すまで再びこのアイテムが処理されることは無いため、安易に付けず、本当に人間の判断が必要な場合にのみ使用すること。`
+コマンド: 「%s」
+このラベルは人間が手動で外すまで解除されない。ラベルを外すまで再びこのアイテムが処理されることは無いため、安易に付けず、本当に人間の判断が必要な場合にのみ使用すること。`, cmd)
+}

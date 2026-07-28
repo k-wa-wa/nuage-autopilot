@@ -59,14 +59,13 @@ GitHub Pull Request #%[3]d (タイトル: 「%[4]s」) の差分レビューを�
    - コメント投稿: 「gh pr comment %[3]d --body "[指摘内容と修正案]"」
 
 2. **問題ない場合 (Passed)**
-   すべての観点でチェックに合格した場合、PRに合格判定のレビューコメントを投稿する。
-   - **重要**: 自己PRに対するGitHub API制限（Approve不可エラー）を避けるため、「--approve」 は使用せず、代わりに「--comment」 オプションを使用してコメントを投稿すること。
-   - レビュー投稿: 「gh pr review %[3]d --comment --body "[Review Result: PASSED]
+   すべての観点でチェックに合格した場合、PRに合格判定のコメントを投稿する。
+   - コメント投稿: 「gh pr comment %[3]d --body "[Review Result: PASSED]
 
 バグ・セキュリティ・性能、および設計規約・影響範囲のいずれの観点でもレビューをパスした。"」
 
 ---
 
 %[5]s
-`, ctx.RepoName, repoRulesNote, ctx.Number, ctx.Title, awaitingUserReviewNote)
+`, ctx.RepoName, repoRulesNote, ctx.Number, ctx.Title, awaitingUserReviewNote(ctx))
 }

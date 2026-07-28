@@ -76,5 +76,5 @@ GitHub Pull Request #%[2]d の最終検証を行い、以下の手順を実行�
 ---
 
 %[5]s
-`, ctx.RepoName, ctx.Number, qaPrinciples, fmt.Sprintf(qaVerificationItems, ctx.Number), awaitingUserReviewNote)
+`, ctx.RepoName, ctx.Number, qaPrinciples, fmt.Sprintf(qaVerificationItems, ctx.Number), awaitingUserReviewNote(ctx))
 }

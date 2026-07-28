@@ -132,3 +132,14 @@ func TestBuildQA_IncludesVerificationAndManualMergePath(t *testing.T) {
 		t.Fatalf("BuildQA must not include the auto-merge branch: %q", got)
 	}
 }
+
+func TestAwaitingUserReviewNote_KindBranching(t *testing.T) {
+	issueCtx := Context{Kind: KindIssue, Number: 42}
+	issueGot := awaitingUserReviewNote(issueCtx)
+	mustContainAll(t, issueGot, `gh issue edit 42 --add-label "agent:awaiting_user_review"`)
+
+	prCtx := Context{Kind: KindPullRequest, Number: 42}
+	prGot := awaitingUserReviewNote(prCtx)
+	mustContainAll(t, prGot, `gh pr edit 42 --add-label "agent:awaiting_user_review"`)
+}
+

@@ -82,5 +82,5 @@ GitHub Issue #%[4]d (タイトル: 「%[5]s」) の仕様定義（要件の明�
 ---
 
 %[6]s
-`, ctx.RepoName, repoRulesNote, specPrinciples, ctx.Number, ctx.Title, fmt.Sprintf(specActionSteps, ctx.Number), awaitingUserReviewNote)
+`, ctx.RepoName, repoRulesNote, specPrinciples, ctx.Number, ctx.Title, fmt.Sprintf(specActionSteps, ctx.Number), awaitingUserReviewNote(ctx))
 }

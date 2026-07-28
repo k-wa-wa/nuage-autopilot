@@ -140,10 +140,14 @@ func TestRemoveLabel_OtherErrorsPropagate(t *testing.T) {
 
 func TestListComments(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/k-wa-wa/pechka/issues/3/comments" {
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues/3/comments":
+			_, _ = w.Write([]byte(`[{"id": 100, "body": "looks good", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`[{"id": 100, "body": "looks good", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
 	})
 
 	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3)
@@ -152,6 +156,44 @@ func TestListComments(t *testing.T) {
 	}
 	if len(comments) != 1 || comments[0].User.Login != "alice" {
 		t.Fatalf("comments = %+v, want single comment from alice", comments)
+	}
+}
+
+func TestListComments_IncludesReviews(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues/3/comments":
+			_, _ = w.Write([]byte(`[{"id": 100, "body": "first comment", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			_, _ = w.Write([]byte(`[{"id": 101, "body": "[Review Result: PASSED]", "user": {"login": "reviewer", "type": "User"}, "submitted_at": "2026-07-01T01:00:00Z"}]`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	})
+
+	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3)
+	if err != nil {
+		t.Fatalf("ListComments() error = %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("got %d comments, want 2", len(comments))
+	}
+	if comments[1].Body != "[Review Result: PASSED]" {
+		t.Fatalf("comments[1].Body = %q, want review body", comments[1].Body)
+	}
+}
+
+func TestCreateLabel(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/k-wa-wa/pechka/labels" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		// 422 応答（既存ラベル）の場合も成功として扱われるかテスト
+		http.Error(w, `{"message": "Already Exists"}`, http.StatusUnprocessableEntity)
+	})
+
+	if err := client.CreateLabel(context.Background(), "k-wa-wa/pechka", "agent:running"); err != nil {
+		t.Fatalf("CreateLabel() error = %v, want nil for 422", err)
 	}
 }
 

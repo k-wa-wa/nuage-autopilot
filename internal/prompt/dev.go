@@ -65,7 +65,7 @@ GitHub Issue #%[4]d (タイトル: 「%[5]s」) に記載された仕様に基�
 ---
 
 %[7]s
-`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote)
+`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx))
 }
 
 // BuildDevPR は dev worker のうち、レビュー指摘や QA 不合格を受けた PR の修正対応向けの
@@ -112,5 +112,5 @@ GitHub Pull Request #%[4]d (タイトル: 「%[5]s」) のレビュー指摘に�
 ---
 
 %[7]s
-`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote)
+`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx))
 }

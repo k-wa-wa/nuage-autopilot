@@ -88,6 +88,10 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		Action:    ActionNoop,
 	}
 
+	// サービス利用ラベルをあらかじめ冪等に作成し、gh CLI 等によるラベル付与エラーを防ぐ。
+	_ = client.CreateLabel(ctx, repo, LabelRunning)
+	_ = client.CreateLabel(ctx, repo, LabelAwaitingUserReview)
+
 	issues, err := client.ListOpenIssues(ctx, repo)
 	if err != nil {
 		return result, fmt.Errorf("cycle: list open issues: %w", err)
