@@ -14,6 +14,8 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/config"
 	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/cycle"
@@ -60,13 +62,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
 	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
 	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Repos: cfg.Repos, Logger: logger}
 
 	var hasError bool
 	for _, repo := range cfg.Repos {
-		result, err := cycle.Run(context.Background(), logger, client, dispatcher, executor, repo, cfg.StateDir)
+		if ctx.Err() != nil {
+			logger.Warn("stopping cycle execution due to signal", "error", ctx.Err().Error())
+			break
+		}
+
+		result, err := cycle.Run(ctx, logger, client, dispatcher, executor, repo, cfg.StateDir)
 		if err != nil {
 			logger.Error("cycle failed", "repo", repo, "error", err.Error())
 			hasError = true

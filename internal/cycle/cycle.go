@@ -204,9 +204,11 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	execErr := executor.Execute(ctx, repo, *chosen, decision.Worker)
 
 	// (7) agent:running は成功・失敗にかかわらず外す（DESIGN.md 8章）。
-	// ここでの RemoveLabel 自体が失敗した場合、agent:running が残留するが、
-	// 自動回収は将来課題であり（DESIGN.md 8章）、当面は人間が手動で外す運用とする。
-	if removeErr := client.RemoveLabel(ctx, repo, chosen.Number, LabelRunning); removeErr != nil {
+	// worker 実行中にシグナル等で ctx がキャンセルされた場合でも RemoveLabel が
+	// context canceled で失敗してラベルが残留しないよう、context.WithoutCancel を使用する。
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cleanupCancel()
+	if removeErr := client.RemoveLabel(cleanupCtx, repo, chosen.Number, LabelRunning); removeErr != nil {
 		logger.Error("failed to remove agent:running after worker execution; a human must remove it manually",
 			"repo", repo, "issue_number", chosen.Number, "error", removeErr.Error())
 	}
