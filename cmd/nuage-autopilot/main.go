@@ -53,7 +53,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// 通知が埋もれるため、警告を残して正常終了する（DESIGN.md 10.5 節）。
 	if missing := config.MissingEnv(); len(missing) > 0 {
 		logger.Warn("required environment variables are not set; skipping this cycle",
-			"repo", cfg.Repo,
+			"repos", cfg.Repos,
 			"missing", missing,
 			"hint", "/var/lib/nuage-autopilot/secrets.env に値を配置する",
 		)
@@ -62,22 +62,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
 	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
-	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, AllRepos: cfg.AllRepos, Logger: logger}
+	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Repos: cfg.Repos, Logger: logger}
 
-	result, err := cycle.Run(context.Background(), logger, client, dispatcher, executor, cfg.Repo, cfg.StateDir)
-	if err != nil {
-		logger.Error("cycle failed", "repo", cfg.Repo, "error", err.Error())
-		return 1
+	var hasError bool
+	for _, repo := range cfg.Repos {
+		result, err := cycle.Run(context.Background(), logger, client, dispatcher, executor, repo, cfg.StateDir)
+		if err != nil {
+			logger.Error("cycle failed", "repo", repo, "error", err.Error())
+			hasError = true
+			continue
+		}
+
+		logger.Info("cycle completed",
+			"repo", result.Repo,
+			"state_dir", result.StateDir,
+			"started_at", result.StartedAt,
+			"action", result.Action,
+			"version", version,
+		)
 	}
 
-	logger.Info("cycle completed",
-		"repo", result.Repo,
-		"state_dir", result.StateDir,
-		"started_at", result.StartedAt,
-		"action", result.Action,
-		"version", version,
-	)
-
+	if hasError {
+		return 1
+	}
 	return 0
 }
 

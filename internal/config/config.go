@@ -14,31 +14,27 @@ const DefaultStateDir = "/var/lib/nuage-autopilot"
 
 // Config は 1 回の起動で使用する設定値を保持する。
 type Config struct {
-	// Repo は処理対象のリポジトリを owner/name 形式で表す（例: "k-wa-wa/pechka"）。
-	// ShowVersion が true の場合は空でよい。
-	Repo string
+	// Repos は今回の起動で巡回・チェックする対象リポジトリの一覧（"owner/name" 形式）。
+	// --repos フラグ（カンマ区切り、例: "k-wa-wa/pechka,k-wa-wa/nuage-workspace"）で指定される。
+	Repos []string
 
 	// StateDir はリポジトリの clone やサイクルの作業状態を置くディレクトリである。
 	StateDir string
-
-	// AllRepos は StateDir 配下に事前 clone / 最新化しておくべきリポジトリ一覧である（"owner/name" 形式）。
-	// --all-repos フラグ（カンマ区切り）で指定される。
-	AllRepos []string
 
 	// ShowVersion が true の場合、呼び出し側はバージョンを表示して即座に終了する。
 	ShowVersion bool
 }
 
-// ErrRepoRequired は --version が指定されていないにもかかわらず --repo が
+// ErrRepoRequired は --version が指定されていないにもかかわらず --repos が
 // 与えられなかった場合に返るエラーである。
-var ErrRepoRequired = errors.New("--repo は必須である（例: --repo k-wa-wa/pechka）")
+var ErrRepoRequired = errors.New("--repos は必須である（例: --repos k-wa-wa/pechka,k-wa-wa/nuage-workspace）")
 
 // RequiredEnvVars は 1 サイクルを実行するために最低限必要な環境変数である。
 //
 // これらは /var/lib/nuage-autopilot/secrets.env から EnvironmentFile 経由で注入される。
 // 同ファイルは SOPS で配布せず手作業で配置する運用のため、VM を作った直後は存在しない。
-// その状態を異常終了として扱うとタイマー実行のたびに service が failed になるため、
-// 呼び出し側は未設定を検知したら警告ログを出して正常終了する（DESIGN.md 10.5 節）。
+// その状態を異常終了として扱うとタイマー実行のたびに service が失敗して
+// 通知が埋もれるため、警告を残して正常終了する（DESIGN.md 10.5 節）。
 //
 // claude の認証情報は CLI の TUI でサインインして各ユーザーの HOME に保存されるため、
 // 環境変数としては要求しない。
@@ -69,27 +65,22 @@ func MissingEnv() []string {
 // Parse は args（通常は os.Args[1:]）と環境変数から Config を組み立てる。
 func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("nuage-autopilot", flag.ContinueOnError)
-	repo := fs.String("repo", "", "処理対象のリポジトリ (owner/name 形式、例: k-wa-wa/pechka)")
-	allReposStr := fs.String("all-repos", "", "事前クリーン更新を行うリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-cluster)")
+	reposStr := fs.String("repos", "", "巡回処理対象のリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-workspace)")
 	showVersion := fs.Bool("version", false, "バージョンを表示して終了する")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
 
-	allRepos := parseCommaList(*allReposStr)
-	if len(allRepos) == 0 && *repo != "" {
-		allRepos = []string{*repo}
-	}
+	repos := parseCommaList(*reposStr)
 
 	cfg := Config{
-		Repo:        *repo,
-		AllRepos:    allRepos,
+		Repos:       repos,
 		StateDir:    resolveStateDir(),
 		ShowVersion: *showVersion,
 	}
 
-	if !cfg.ShowVersion && cfg.Repo == "" {
+	if !cfg.ShowVersion && len(cfg.Repos) == 0 {
 		return Config{}, ErrRepoRequired
 	}
 

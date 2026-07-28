@@ -57,7 +57,7 @@ func TestRun_RepoLogsCycleCompletion(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 
-	code := run([]string{"--repo", "k-wa-wa/pechka"}, &stdout, &stderr)
+	code := run([]string{"--repos", "k-wa-wa/pechka"}, &stdout, &stderr)
 
 	if code != 0 {
 		t.Fatalf("run(--repo) exit code = %d, want 0 (stderr: %s)", code, stderr.String())
