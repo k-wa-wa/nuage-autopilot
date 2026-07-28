@@ -9,7 +9,6 @@ import (
 )
 
 // DefaultStateDir は --state-dir / NUAGE_STATE_DIR のいずれも指定されなかった場合の既定値である。
-// nix/modules/nuage-autopilot.nix の stateDir 既定値と一致させること。
 const DefaultStateDir = "/var/lib/nuage-autopilot"
 
 // Config は 1 回の起動で使用する設定値を保持する。

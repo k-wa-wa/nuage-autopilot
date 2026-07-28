@@ -18,9 +18,6 @@ import (
 	"time"
 )
 
-// Command は起動する claude CLI の実行ファイル名である。絶対パスは持たず、PATH解決に
-// 委ねる。nix/modules/nuage-autopilot.nix の extraPathPrefixes がサービスの PATH に
-// claude を通す（claude は Nix パッケージではなく公式インストーラで導入するため）。
 const Command = "claude"
 
 // claude 2.1.220 の --help で確認したフラグのうち採用したもの:

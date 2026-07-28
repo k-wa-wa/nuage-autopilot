@@ -35,12 +35,12 @@ GitHub Issue / PR を起点に、自律型 LLM CLI を駆動してアプリ開�
 nuage-workspace (public)
   flake.nix
     packages.x86_64-linux.nuage-autopilot   # buildGoModule
-    nixosModules.nuage-autopilot            # services.nuage-autopilot
         │
         │ inputs.nuage-workspace
         ▼
-nuage-cluster/nix/flake.nix
-  nixosConfigurations.autopilot-server.modules += [ nuage-workspace.nixosModules.nuage-autopilot ]
+nuage-cluster/nix/
+  hosts/autopilot-server/configuration.nix で nuage-workspace.packages.* を参照し
+  systemd.services.nuage-autopilot を定義
         │
         │ master へ push → system.autoUpgrade (daily / OnBootSec 30s)
         ▼
@@ -54,23 +54,20 @@ autopilot-server 上で systemd サービスとして稼働
 
 ```
 nuage-workspace/
-├── flake.nix                       # packages / nixosModules を export
-├── autopilot/
-│   ├── DESIGN.md                   # 本ファイル
-│   ├── go.mod                      # 依存ゼロ (stdlib のみ) のため vendor/ は無い
-│   ├── secrets.env.example
-│   ├── cmd/nuage-autopilot/
-│   │   └── main.go                 # エントリポイント
-│   └── internal/
-│       ├── config/                 # フラグ・環境変数の解決
-│       ├── github/                 # Issue / PR / label 操作 (net/http)
-│       ├── prompt/                 # 各フェーズのプロンプト定義
-│       ├── repo/                   # 対象リポジトリの clone / 更新
-│       ├── runner/                 # LLM CLI (claude) の起動
-│       └── cycle/                  # 1 サイクルの制御フロー
-└── nix/
-    └── modules/
-        └── nuage-autopilot.nix     # NixOS モジュール
+├── flake.nix                       # packages を export
+└── autopilot/
+    ├── DESIGN.md                   # 本ファイル
+    ├── go.mod                      # 依存ゼロ (stdlib のみ) のため vendor/ は無い
+    ├── secrets.env.example
+    ├── cmd/nuage-autopilot/
+    │   └── main.go                 # エントリポイント
+    └── internal/
+        ├── config/                 # フラグ・環境変数の解決
+        ├── github/                 # Issue / PR / label 操作 (net/http)
+        ├── prompt/                 # 各フェーズのプロンプト定義
+        ├── repo/                   # 対象リポジトリの clone / 更新
+        ├── runner/                 # LLM CLI (claude) の起動
+        └── cycle/                  # 1 サイクルの制御フロー
 ```
 
 ## 5. Go 実装の方針
@@ -91,53 +88,43 @@ GitHub API は `net/http` で直接叩き、git 操作と認証は `git` / `gh` 
 
 依存を追加する場合は `go mod vendor` して `vendor/` をコミットすること。
 
-## 6. Nix モジュール仕様
+## 6. systemd サービス仕様
 
-`services.nuage-autopilot` のオプション:
+NixOS モジュール化は行わず、`nuage-cluster` 側の `hosts/autopilot-server/configuration.nix` にて `systemd.services.nuage-autopilot` を直接定義する。
 
-| オプション | 型 | 既定値 | 説明 |
-| :-- | :-- | :-- | :-- |
-| `enable` | bool | `false` | 有効化 |
-| `package` | package | 本 flake の `nuage-autopilot` | 実行するパッケージ |
-| `repositories` | listOf str | `[]` | 対象リポジトリ (`"k-wa-wa/pechka"` 形式) |
-| `stateDir` | str | `/var/lib/nuage-autopilot` | 作業ディレクトリ |
-| `interval` | str | `"*:0/5"` | systemd `OnCalendar` |
-| `enableTimer` | bool | `true` | 定期実行の有無。`false` でも service unit は生成されるため `systemctl start` で手動実行できる。導入直後の目視確認用 |
-| `environmentFile` | str | `"-/var/lib/nuage-autopilot/secrets.env"` | secret の注入元 |
-| `timeout` | str | `"30m"` | 1 サイクルの `TimeoutStartSec` |
-| `user` | str | `"nixos"` | サービスの実行ユーザー。claude の認証情報を置く HOME の持ち主と一致させる |
-| `extraPackages` | listOf package | `[]` | PATH に追加する Nix パッケージ |
-| `extraPathPrefixes` | listOf str | `[]` | PATH に追加する Nix 管理外のディレクトリ。NixOS の `path` 仕様により末尾へ `/bin` が付与されるため、`/home/nixos/.local` のように親を指定する |
+### 構成方針
 
-### unit の生成方針
+単一の `nuage-autopilot.service` unit を定義し、`--repos` 引数にカンマ区切りで対象リポジトリ一覧（`"k-wa-wa/pechka,k-wa-wa/nuage-cluster,..."`）を渡すことで、1 回の起動で全リポジトリを直列に巡回・処理する。
 
-systemd の template unit (`nuage-autopilot@.service`) は使わず、
-**`repositories` から 1 リポジトリにつき 1 組の service + timer を生成する**。
-
+```nix
+systemd.services.nuage-autopilot = {
+  description = "nuage-autopilot: 全リポジトリを巡回して 1 サイクルを実行する";
+  after = [ "network-online.target" ];
+  wants = [ "network-online.target" ];
+  path = [ pkgs.git pkgs.gh "/home/nixos/.local" ];
+  environment.NUAGE_STATE_DIR = "/var/lib/nuage-autopilot";
+  serviceConfig = {
+    Type = "oneshot";
+    StateDirectory = "nuage-autopilot";
+    EnvironmentFile = "-/var/lib/nuage-autopilot/secrets.env";
+    TimeoutStartSec = "30m";
+    ExecStart = "${lib.getExe pkg} --repos ${reposArg}";
+    User = "nixos";
+  };
+};
 ```
-nuage-autopilot-pechka.service / .timer
-nuage-autopilot-nuage-cluster.service / .timer
-```
-
-理由: instance 名に `/` を含められずエスケープが必要になること、
-per-instance の `Environment=` 指定が煩雑になることを避けるため。
-リポジトリ一覧はどのみち宣言的なので、生成してしまうほうが単純である。
 
 ### service の要件
 
 - `Type = "oneshot"`
-- `StateDirectory = "nuage-autopilot"`（`stateDir` に対応）
-- `EnvironmentFile` は先頭 `-` 付き（ファイルが無くても起動失敗しない）
-  - `nix/modules/common.nix` の `nix-daemon` の `EnvironmentFile` と同じイディオム
-- `TimeoutStartSec` でハングを検知（旧 Supervisor の代替）
-- `path` に `git` / `gh` / 必要なツールチェーンを含める
-- `DynamicUser` は使わない（`git clone` と後の LLM CLI が HOME を要求するため）
+- `StateDirectory = "nuage-autopilot"`（`/var/lib/nuage-autopilot` ディレクトリを作成する）
+- `EnvironmentFile` は先頭 `-` 付き（ファイルが存在しなくても起動失敗させない）
+  - `nix/modules/common.nix` の `nix-daemon` の `EnvironmentFile` と同じイディオムを使用する
+- `TimeoutStartSec` でハングを検知する（旧 Supervisor の代替）
+- `path` に `git` / `gh` / `"/home/nixos/.local"`（claude インストーラの配置先）を含める
+- `DynamicUser` は使わない（`git clone` と LLM CLI が固定の HOME を要求するため）
+- 現在 timer unit は未設定であり、`systemctl start nuage-autopilot` による手動実行（または必要に応じて定期実行用タイマーを追加設定）で運用する
 
-### timer の要件
-
-- `OnCalendar = cfg.interval`
-- `Persistent = true`
-- `RandomizedDelaySec` を入れてリポジトリ間で実行時刻をずらす
 
 ## 7. 実行モデル
 
@@ -275,8 +262,8 @@ preview に一本化して二重メンテを解消する。
 中身の実装より先に「push すれば autopilot-server に届く」経路を確立する。
 
 - `autopilot/` の Go スケルトン（ビルドが通り、1 サイクル相当のログを出して正常終了する）
-- `flake.nix` で `packages` と `nixosModules` を export
-- `nix/modules/nuage-autopilot.nix` の実装
+- `flake.nix` で `packages` を export
+- `nuage-cluster` 側の `hosts/autopilot-server/configuration.nix` で systemd サービスを定義
 
 この段階では LLM CLI を呼ばない。`claude-code` パッケージの調達（後述）を Phase 1 の
 リスクから外すため。
@@ -296,7 +283,7 @@ claude は公式インストーラ（`curl | bash`）で導入し、TUI でサ�
 （`nuage-cluster/nix/hosts/autopilot-server/configuration.nix` で有効化済み）。
 
 実体は `~/.local/bin/claude`（`~/.local/share/claude/versions/<version>` への symlink）で、
-Nix パッケージではないため `services.nuage-autopilot.extraPathPrefixes` で
+Nix パッケージではないため systemd サービスの `path` に `"/home/nixos/.local"` を含めて
 サービスの PATH に通す。
 
 ### Phase 4: preview 環境との接続
@@ -315,7 +302,7 @@ Holmes を廃止したうえで、この経路に置き換える。
 GitHub / Claude / Antigravity のトークンは **SOPS で配布しない**。
 流出時の影響が大きいため、VM 起動後に手作業で配置する運用とする。
 
-- 配置先: `/var/lib/nuage-autopilot/secrets.env`（`services.nuage-autopilot.user` の所有 / `0600`）
+- 配置先: `/var/lib/nuage-autopilot/secrets.env`（ systemd サービスの `User` (`nixos`) の所有 / `0600`）
 - 参照方法: systemd の `EnvironmentFile`。先頭に `-` を付けるため、
   ファイルが存在しなくてもサービスは起動に失敗しない
 - テンプレート: [`secrets.env.example`](./secrets.env.example)
@@ -335,7 +322,7 @@ GitHub / Claude / Antigravity のトークンは **SOPS で配布しない**。
 （`~/.claude` 等）に保存する。したがって API キーを `secrets.env` に置く必要はない。
 
 代わりに、**人間がサインインするユーザーとサービスの実行ユーザーを一致させる**必要がある。
-`services.nuage-autopilot.user`（既定 `nixos`）が `User=` に設定され、systemd が
+サービスの `User`（`nixos`）が `User=` に設定され、systemd が
 passwd から `HOME` を設定する。root で動かすと、SSH でログインしてサインインした
 ユーザーの認証情報を読めない。
 
@@ -365,12 +352,12 @@ VM は `terraform/vpc/zone-dev/autopilot-server.tf`、OS 構成は
 - `programs.nix-ld` を有効化（インストーラ版 claude の実行に必須）
 - nameserver に lb の CoreDNS VIP `192.168.5.200` を指定。`cluster.wpc` を
   ワイルドカードで解決するため、PR ごとに変わる preview のホスト名にも到達できる
-- `extraPathPrefixes = [ "/home/nixos/.local" ]` で claude を PATH に通す
+- systemd サービスの `path` に `"/home/nixos/.local"` を含めて claude を PATH に通す
 
 人手が必要な作業:
 
 - `secrets.env` の配置（`GH_TOKEN` / `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`）
-- claude の TUI サインイン（`services.nuage-autopilot.user` と同一ユーザーで実行する）
+- claude の TUI サインイン（systemd サービスの `User = "nixos"` と同一ユーザーで実行する）
 
 ### 反映手順
 
