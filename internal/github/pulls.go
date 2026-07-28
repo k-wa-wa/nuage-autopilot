@@ -24,10 +24,9 @@ func (c *Client) ListOpenPullRequests(ctx context.Context, repo string) ([]PullR
 
 // GetPullRequest は repo の number 番の PR 単体を取得する。
 //
-// worker 実行後、push によって変化した可能性のある head SHA を権威ある情報源から
-// 再取得するために使う（internal/cycle/executor.go が状態行の sha= フィールドを
-// 埋めるために呼ぶ）。EnsureWorkspace で clone したローカルの HEAD ではなく
-// GitHub 側の状態を正とする。
+// push によって変化した可能性のある head SHA を権威ある情報源から取得する用途を
+// 想定している。EnsureWorkspace で clone したローカルの HEAD ではなく GitHub 側の
+// 状態を正とする。
 func (c *Client) GetPullRequest(ctx context.Context, repo string, number int) (PullRequest, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo, number)
 

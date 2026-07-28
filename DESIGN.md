@@ -1,17 +1,93 @@
 # nuage-autopilot 設計書
 
 GitHub Issue / PR を起点に、自律型 LLM CLI を駆動してアプリ開発を自動化する仕組み。
-`nuage-agent` リポジトリの構想を、**完全に宣言的な NixOS サービス**として作り直したもの。
 
 ---
 
 ## 1. 目的と到達点
 
-- Issue に「やりたいこと」を書けば、数十分後に PR と preview 環境が立ち上がっている状態を作る
-- リスクの高い作業（インフラ・Talos・Terraform・SOPS）は従来通りローカル PC で人間と対話しながら行う
-- アプリ層の変更（バグ修正・小さな機能追加）は自動化・省力化する
+Issue に「やりたいこと」を曖昧なまま書けば、エージェントが質問を返し、回答すれば実装と
+レビューを済ませた PR が上がってくる。preview を見てフィードバックを書けば PR が修正される。
+人間が明示的に行うのは「書くこと」と「マージすること」だけである。
 
-## 2. 決定事項
+リスクの高い作業（インフラ・Talos・Terraform・SOPS）は従来通りローカル PC で人間と対話
+しながら行う。自動化の対象はアプリ層の変更に限る。
+
+## 2. ユーザーストーリー（これが仕様である）
+
+1. GitHub 上で曖昧に issue を起票する
+2. エージェントが裏で動き、質問をしてくる
+3. issue 上で質問に回答する
+4. エージェントが裏で動き、実装しレビューまで済ませた PR を作成する
+5. （スコープ外）PR に基づいて preview 環境が自動で立ち上がる
+6. preview を見てフィードバックする
+7. エージェントが裏で動き、PR を修正する
+8. 人間がマージする
+
+Issue が大きい場合は、エージェントがサブ Issue に分割しながら進める。
+
+この 8 ステップのうち、**2・4・7 以外のすべてが人間の行動によって駆動される**。
+本設計はこの構造をそのまま実装に写し取る。
+
+## 3. 設計の中核にある 3 つの判断
+
+### 3.1 イベント駆動にする
+
+ストーリーの遷移は、すべて人間か CI のアクションに対応する。
+
+| ストーリー | 対応するイベント |
+| :-- | :-- |
+| 1. issue 起票 | issue が open された |
+| 3. 質問に回答 | 人間がコメントした |
+| 6. preview を見て FB | 人間がコメント / レビューした |
+| 8. マージ | PR が close / merge された |
+| （実装後の合否） | CI チェックが完了した |
+
+イベントを取り込めば「何が起きたか」が最初から手に入る。**イベントが無ければ LLM も
+GitHub API もほぼ呼ばない**。これがコスト削減の最大のレバーである。
+
+旧設計は毎サイクル全 Issue/PR とその全コメントを取得し、コメント本文に埋め込んだ状態行を
+パースして状態を復元していた。この復元作業を丸ごと不要にする。
+
+### 3.2 状態は SQLite に持つ
+
+旧設計は「ラベルをプログラムカウンタにしない。毎サイクル現実から状態を導出し直す」という
+方針を採り、状態行 + ラベル 2 種で状態を表現していた。この方針自体は健全だったが、
+導出のたびに全コメントの取得とパースが必要になり、かつラベルでは表現できない状態
+（Issue の親子関係、実行中のリース、予算消費）が扱えなかった。
+
+状態を DB に移すことで次が可能になる。
+
+| 得られるもの | 旧設計での問題 |
+| :-- | :-- |
+| TTL 付きリース | `agent:running` はクラッシュすると人間が剥がすまで永久に対象外 |
+| Issue の親子関係 | ラベルでは木を表現できず、サブ Issue 分割が実装不能 |
+| claude セッションの継続 | 毎回ゼロから issue を読み直していた |
+| 予算（コスト・実行回数）の蓄積 | 「bot コメント数 5 件」という間接的な代理指標しかなかった |
+| 「回答待ち」をラベルで表現しない | 人間がラベルを剥がさないと再開しなかった |
+
+**DB は真実ではない。GitHub が真実である。** したがって低頻度の全走査（resync）による
+修復を必ず併走させる。これは Kubernetes のコントローラが watch と定期 resync を
+併用しているのと同じ構造である。
+
+### 3.3 エージェントを自由にし、Go は「起こすか否か」だけを決める
+
+旧設計は worker を 4 種（spec/dev/review/qa）→ 2 種（work/verify）と統合しつつ、
+「次にどの worker を起動するか」を Go の遷移表が決め、worker は 1 起動 1 ステップに
+制限され、GitHub への書き込みを全面的に禁止されていた。
+
+本設計では Go が決めるのは **「起こすか否か」だけ**とする。何をするかはエージェントが決める。
+
+- worker は **1 種類**に統合する（将来 verify のみ独立させる。8.4 節）
+- エージェントは `gh` で自由にコメント・Issue 起票・ラベル操作を行ってよい
+- 1 起動で実装 → テスト → 自己レビュー → PR まで走り切ってよい
+- 「今回は何もしない」を選んでよい
+
+イベント駆動にしたことで、Go 側の遷移表はむしろ**小さくなる**。旧設計が状態行から
+再構成していた「新しい人間コメントがあるか」「状態行以降に新しいコミットが積まれたか」は、
+イベントそのものが直接教えてくれるため不要になる。
+
+## 4. 決定事項
 
 | 項目 | 決定 | 却下した選択肢と理由 |
 | :-- | :-- | :-- |
@@ -19,17 +95,487 @@ GitHub Issue / PR を起点に、自律型 LLM CLI を駆動してアプリ開�
 | 宣言性 | Nix で完全宣言。手で入れるのは secret のみ | — |
 | 言語 | Go | TS/bun → Nix でのパッケージングが枯れていない |
 | 実装場所 | `nuage-workspace/autopilot/` | 別リポジトリ → 横断管理の場に集約したい |
-| 状態管理 | GitHub の Issue/PR ラベルのみ（DB なし） | — |
-| プロセスモデル | `Type=oneshot` + `systemd.timers` | 常駐デーモン + 自作 crawler → 状態を持ち複雑 |
+| 状態管理 | SQLite（`/var/lib/nuage-autopilot/state.db`） | ラベル + コメント状態行 → 表現力とコストの両面で限界 |
+| イベント取り込み | `GET /notifications` の条件付きポーリング | 後述（5 節） |
+| プロセスモデル | 単一バイナリの常駐プロセス（`Type=notify`）+ goroutine | oneshot × 3 unit + timers → Nix 側の記述が増え、プロセス間で SQLite を奪い合う |
+| LLM CLI | claude のみ | Antigravity → 一本化する |
 | 検証環境 | 既存の k8s preview (ArgoCD ApplicationSet) | EVPN Zone 払い出し → 過剰 |
 | secret 注入 | 手動配置 + `EnvironmentFile` | sops-nix → 今回は不要 |
 | 観測 | journald → promtail → Loki（既存スタック） | 自作 TUI → 捨てる |
-| Holmes | 廃止する（別タスク） | — |
 
-## 3. リポジトリ境界とデプロイ経路
+### イベント取り込み手段の選定
 
-`nuage-cluster/nix/flake.nix` は既に `nix-config.url = "github:k-wa-wa/nix-config"` を
-外部 flake input として取り込んでいる。まったく同じ形で `nuage-workspace` を input にする。
+autopilot-server を含むクラスタには**インターネットからの inbound 経路が無い**
+（`bare-web-proxy` の prod ingress は内部 CA の `ca-clusterissuer` を使い、ホスト名も
+内部ゾーンの `*.cluster.wpc` である）。したがって素の webhook は選択できず、
+実質「トンネル」対「ポーリング」の比較になる。
+
+| | notifications ポーリング | `gh webhook forward` | cloudflared + webhook |
+| :-- | :-- | :-- | :-- |
+| 常駐プロセス | 不要 | 必要 | 必要 |
+| 宣言性 | 保てる | `gh extension install` が必要で崩れる | nixpkgs にあり保てる |
+| 配信の再送 | cursor で自然に追いつく | **無い（落ちている間のイベントは消える）** | GitHub 側で redeliver 可能 |
+| CI (`check_suite`) | 取れない（別途取得が必要） | 取れる | 取れる |
+| 遅延 | 最大 1 分 | 約 1 秒 | 約 1 秒 |
+
+**notifications を採用する。** 判断の根拠は次の通りである。
+
+- 遅延は利点にならない。ストーリーの各ステップは人間が issue を書く・回答する・preview を
+  見るという人間ペースで進み、エージェントの実行自体が数分から数十分かかる。1 分は
+  体感差にならない
+- ポーリングは stateless かつ self-healing であり、故障モードが「遅れる」しかない。
+  トンネルは「黙って死ぬ」故障モードを持ち、しかも `gh webhook forward` は再送を持たない
+- `gh webhook forward` は開発用ツールとして提供されており、24/7 の可用性を前提にしていない
+
+ただし**取り込み手段は差し替え可能な形で実装する**（7.1 節）。遅延や CI イベントの
+取り扱いが実際に痛くなった場合は、cloudflared 経由の webhook receiver を
+同じ `events` テーブルに書き込む source として追加する。下流は一切変更しない。
+
+## 5. アーキテクチャ
+
+単一バイナリの常駐プロセス 1 つで構成し、内部を 4 つの goroutine に分ける。
+
+```
+                      nuage-autopilot （単一プロセス）
+  ┌──────────────────────────────────────────────────────────┐
+  │                                                          │
+GitHub ──→ [poller]      1 分ごと。notifications を取り込む   │
+  │           │                                              │
+  │           ├─ events に enqueue ─→ SQLite ←──────┐        │
+  │           └─ chan で通知 ─┐                     │        │
+  │                           ▼                     │        │
+  │         [worker]  通知 or 1 分ごと。1 件処理     │        │
+  │           │                                     │        │
+  │           ▼                                     │        │
+  │         claude （1 アイテム = 1 セッション）      │        │
+  │           ├─→ gh でコメント・Issue 起票・PR 作成 （人間チャネル）
+  │           └─→ NUAGE_REPORT_FILE に outcome      （機械チャネル）
+  │                                                 │        │
+  │         [resyncer] 1 時間ごと。全走査して修復 ───┘        │
+  │                                                          │
+  │         [watchdog] 30 秒ごとに sd_notify WATCHDOG=1       │
+  └──────────────────────────────────────────────────────────┘
+```
+
+**単一プロセスにする理由**は 3 つある。
+
+- 旧設計が常駐デーモンを却下した理由は「状態を持ち複雑になる」ことだった。状態が
+  SQLite に移った今、常駐しても**プロセスは無状態のまま**であり、この理由は成立しない
+- Nix 側の記述が 3 service + 3 timer から 1 service に減る
+- SQLite を単一プロセス内の `*sql.DB` 1 つで共有できる。複数プロセスからのロック競合を
+  考える必要がなくなる
+
+poller は enqueue 後にチャネルで worker を起こす。イベントが積まれた瞬間に処理が
+始まるため、ポーリング間隔ぶんの待ちが発生しない。チャネルはバッファ 1 のノンブロッキング
+送信とし、worker が取りこぼしても次の定期起床（1 分）が拾う。
+
+worker が 30 分かかっている間も poller と resyncer は動き続ける。
+
+### ハング検知
+
+oneshot + `TimeoutStartSec` が無料で提供していた「ハングしたら殺して次回やり直す」性質は、
+常駐プロセスでは自前で用意する必要がある。3 層で守る。
+
+| 層 | 対象 | 手段 |
+| :-- | :-- | :-- |
+| claude の実行 | エージェント 1 回の実行 | `context.WithTimeout`（既定 120 分）。`exec.CommandContext` が子プロセスを殺す |
+| HTTP | GitHub API 呼び出し | `http.Client.Timeout` |
+| プロセス全体 | デッドロック・goroutine の停止 | systemd の `WatchdogSec` + `sd_notify` |
+
+watchdog goroutine は、poller / worker / resyncer がそれぞれ更新する
+「最終生存時刻」（atomic）を確認し、すべてが期待間隔内に動いている場合にのみ
+`WATCHDOG=1` を送る。停止していれば送信をやめ、systemd がプロセスを再起動する。
+
+`sd_notify` は `$NOTIFY_SOCKET` への datagram 送信であり、外部依存を必要としない
+（数十行の自前実装で足りる）。
+
+### 停止時の挙動
+
+`SIGTERM` を受けたら新規のエージェント起動を止め、実行中のものには猶予を与えて待つ。
+猶予を超えたら claude を kill し、**保持している lease を解放してから終了する**。
+
+lease は TTL を持つため、解放できずに終了しても最終的には回収される。
+明示的な解放は「再起動後すぐに再開できる」ようにするための最適化にすぎない。
+
+## 6. 状態モデル
+
+### 6.1 phase と lease は直交する
+
+- **phase** はストーリー上どこまで進んだかを表す永続的な状態である
+- **lease** は「今この瞬間、誰かが作業中か」を表す一時的な排他制御である
+
+両者を混同しないため、`working` に相当する phase は**持たない**。これにより、
+プロセスがクラッシュして lease が期限切れになっても phase はそのまま残り、
+次の実行が自然に再開できる。旧設計の `agent:running` が人間の手による回収を
+必要としていた問題は、この分離によって構造的に消える。
+
+### 6.2 phase
+
+| phase | 意味 | 何を待っているか |
+| :-- | :-- | :-- |
+| `new` | 認識したが未着手 | 着火 |
+| `awaiting_answer` | エージェントが質問した | **人間の回答** |
+| `in_review` | PR がある。CI・検証・修正を反復中 | CI 完了 / 検証 / 人間の FB |
+| `ready` | 実装が済み CI も緑（将来はここに verify 合格が加わる） | **人間のマージ** |
+| `blocked` | 人間の判断が必要 | **人間の対応** |
+| `delegated` | サブ Issue に分割済み | 子の完了 |
+| `done` | close / merge 済み | — |
+
+**`awaiting_answer` がラベルではなく phase であることが、ストーリー 2 → 3 を成立させる。**
+人間が issue に回答すれば、そのコメントがイベントになり、そのまま次に進む。
+人間が剥がすべきラベルは存在しない。
+
+### 6.3 スキーマ
+
+```sql
+PRAGMA user_version = 1;
+
+CREATE TABLE items (
+  id           INTEGER PRIMARY KEY,
+  repo         TEXT    NOT NULL,           -- "owner/name"
+  number       INTEGER NOT NULL,
+  kind         TEXT    NOT NULL,           -- issue | pull_request
+  phase        TEXT    NOT NULL,
+  parent_id    INTEGER REFERENCES items(id),
+  session_id   TEXT,                       -- claude --resume 用
+  head_sha     TEXT,
+  cost_usd     REAL    NOT NULL DEFAULT 0,
+  runs         INTEGER NOT NULL DEFAULT 0,
+  last_seen_at TEXT,                       -- 取り込み済みコメントの最新時刻
+  updated_at   TEXT    NOT NULL,
+  UNIQUE(repo, number)
+);
+
+CREATE TABLE events (
+  id           INTEGER PRIMARY KEY,
+  dedup_key    TEXT    NOT NULL UNIQUE,    -- "comment:<id>" 等
+  item_id      INTEGER NOT NULL REFERENCES items(id),
+  type         TEXT    NOT NULL,
+  actor        TEXT    NOT NULL,
+  body         TEXT,
+  created_at   TEXT    NOT NULL,
+  processed_at TEXT                        -- NULL = 未処理（これがキューである）
+);
+
+CREATE TABLE leases (
+  item_id    INTEGER PRIMARY KEY REFERENCES items(id),
+  holder     TEXT NOT NULL,                -- host:pid
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE cursors (
+  source        TEXT PRIMARY KEY,          -- "notifications"
+  etag          TEXT,
+  last_modified TEXT,
+  since         TEXT,
+  polled_at     TEXT
+);
+```
+
+`events.processed_at IS NULL` がそのまま処理待ちキューになる。別途キュー機構を持たない。
+
+`dedup_key` の UNIQUE 制約が冪等性を保証する。同じコメントを何度取り込んでも
+イベントは 1 件しか生まれない。webhook を追加した場合は delivery ID をここに入れる。
+
+### 6.4 SQLite ドライバと vendorHash
+
+**pure-Go の実装（`modernc.org/sqlite`）を使う。** cgo が入ると `buildGoModule` での
+ビルドと後述の `vendorHash = null` 運用が破綻するためである。
+
+`buildGoModule` は通常 `vendorHash` を要求し、`go.mod` を変更するたびにハッシュがズレて
+ビルドが落ちる。**このシステムはエージェント自身が依存を追加する**ため、これは致命的である。
+そこで `vendorHash = null` を指定してハッシュ管理を不要にし、`go mod vendor` した
+`vendor/` をコミットすることでこれを成立させる。
+
+旧実装は外部依存ゼロ（stdlib のみ）で `vendor/` を持たずに済んでいたが、本設計では
+SQLite ドライバの追加に伴い `vendor/` のコミットが必須になる。依存はこれ以外に
+増やさない方針を維持する。GitHub API は `net/http` で直接叩き、git 操作と認証は
+`git` / `gh` CLI をサービスの PATH 経由で呼ぶ。
+
+## 7. イベント取り込み
+
+### 7.1 source は差し替え可能にする
+
+```
+[notifications poller] ─┐
+[webhook receiver]     ─┼──→  events テーブル  ──→  以降は共通
+[resync sweeper]       ─┘
+```
+
+イベントの正規化さえ揃えれば、取り込み手段を追加・変更・併走させても下流
+（phase 遷移・lease・エージェント起動）は一切変わらない。
+
+### 7.2 notifications ポーリングの手順
+
+```
+1. GET /notifications?since=<cursor>  （If-Modified-Since / If-None-Match 付き）
+      → 304 なら即終了。rate limit を消費しない
+2. 200 → 更新されたスレッド一覧を得る
+3. 変化したアイテムについてのみ GET /issues/{n}/comments?since=<item.last_seen_at>
+4. actor == bot login のものを捨てる
+5. 残りを events に enqueue し、item.last_seen_at と cursor を更新する
+```
+
+3 が notifications 方式の追加コストだが、**変化したアイテムにしか発生しない**。
+静かな時間帯は 1 の 304 だけで終わる。1 分間隔で回しても 1 日 1440 回の
+実質無料リクエストに収まる。
+
+スレッドを既読にする `PATCH` は行わない（書き込みリクエストを増やさないため）。
+`since` パラメータとアイテムごとの `last_seen_at` を watermark として使い、
+重複は `dedup_key` が吸収する。
+
+### 7.3 自分のコメントで自分を起こしてはならない
+
+**これは設計上の必須要件である。** エージェントが `gh` でコメントを投稿すると、
+それ自体が notification を発生させる。フィルタしなければポーラーがそれを拾い、
+エージェントを起こし、またコメントし、**無限ループする**。
+
+webhook なら payload の `sender` を見れば済むが、`/notifications` はスレッド単位でしか
+返さないため、必ず 7.2 の手順 3 まで降りて投稿者を確認する必要がある。
+
+判定は bot login（`GET /user` の結果。プロセス内でキャッシュしてよい）との一致、
+および投稿者の `type == "Bot"` で行う。
+
+旧設計にも同等の判定（`isOwnComment`）は存在したが、それはループ上限の計数という
+副次的な用途だった。本設計では**これが無いと暴走する**という位置づけに変わる。
+
+### 7.4 CI の完了は notifications では取れない
+
+`check_suite` / `check_run` は notification に来ない。`phase = in_review` のアイテムに
+限って `GET /repos/{repo}/commits/{sha}/check-runs` を直接取得する。
+
+対象は通常 0〜2 件しかないため、コストは有界に収まる。状態が前回から変化した場合のみ
+`ci_success` / `ci_failure` イベントを enqueue する。
+
+### 7.5 resync
+
+**取り込み手段が何であれ、整合性の最終保証は定期的な全走査である。**
+webhook は配信に失敗しうるし、トンネルは切れるし、notifications は取りこぼす。
+
+毎時 1 回、全対象リポジトリの open な Issue/PR を走査して次を行う。
+
+- DB に無いアイテムを登録する（**着火はしない**。7.6 節を参照）
+- GitHub 上で close / merge 済みのアイテムを `done` にする
+- `head_sha` の乖離を修正する
+- 期限切れの lease を削除する
+
+### 7.6 初回起動時に一斉着火しない
+
+DB が空の状態で起動すると、既存の open Issue すべてが「新規」に見える。そのまま
+着火すると多数のエージェントが同時に走り、コストが跳ねる。
+
+**初めて認識したアイテムは `new` として記録するだけで着火しない。**
+着火するのは cursor 以降に発生したイベントを持つアイテムのみである。
+つまり「autopilot を有効にした後に起票された Issue」から動き始める。
+
+既存の Issue を対象にしたい場合は、人間がその Issue にコメントを 1 件書けばよい
+（それがイベントになる）。
+
+## 8. 遷移とエージェント
+
+### 8.1 遷移表（LLM を呼ばない）
+
+Go が決めるのは「起こすか否か」だけである。
+
+| phase | イベント | 動作 |
+| :-- | :-- | :-- |
+| `new` | opened / commented | エージェント起動（新規セッション） |
+| `awaiting_answer` | commented（人間） | エージェント起動（resume） |
+| `blocked` | commented（人間） | エージェント起動（resume） |
+| `in_review` | ci_failure | エージェント起動（resume） |
+| `in_review` | ci_success | `ready` へ遷移（**将来ここに verify が入る**。8.4 節） |
+| `in_review` | commented / reviewed（人間） | エージェント起動（resume） |
+| `ready` | commented / reviewed（人間） | エージェント起動（resume） |
+| `ready` | ci_failure（人間の追加 push） | エージェント起動（resume）。`in_review` へ戻す |
+| `delegated` | child_done（全子完了） | エージェント起動（resume） |
+| `done` | 任意 | 無視 |
+| 任意 | closed / merged | 記録のみ。`done` へ |
+| 任意 | イベント無し | **何もしない** |
+
+旧設計の遷移表（PR 11 行 + Issue 6 行）と比べて条件が単純になっている。
+sha の比較も「状態行より新しい人間コメントがあるか」の導出も CI のポーリング判定も、
+イベントが直接教えてくれるため不要になったためである。
+
+`ask`（dispatcher による意図分類）も廃止する。旧設計が haiku を呼んでいたのは
+「直近の人間コメントの意図が修正指示か再検証依頼か対応不要か」を分類するためだったが、
+これは**ポーリングでは「何が変わったか」が分からないから必要になった仕事**である。
+イベントにはコメント本文も投稿者も入っているので、分類せずそのままエージェントに渡せばよい。
+**LLM 呼び出しが 1 回減り、分類ミスによる空転も消える。**
+
+### 8.2 チャネルを 2 本に分ける
+
+旧設計は 1 つのオブジェクト（状態行付きコメント）が「人間への伝達」と「機械可読な状態」の
+2 役を兼ねており、そのために書式を機械保証する必要があった。状態が DB に移った以上、
+この兼務をやめる。
+
+| | 宛先 | 中身 | 書き手 |
+| :-- | :-- | :-- | :-- |
+| **人間チャネル** | GitHub の comment / PR body / Issue | 自由。長さも書式も回数も制限しない | エージェント |
+| **機械チャネル** | `NUAGE_REPORT_FILE` | 極小の構造化データ | エージェント |
+
+エージェントが変な書式で書いても、書き忘れても、DB の phase は無傷である。
+旧設計が `gh` でのコメントを禁止した理由（書式が崩れると状態が失われる）は消滅する。
+
+### 8.3 エージェントの契約
+
+Go が渡すのは「このアイテムでこのイベントが起きた」だけである。返してもらうのは
+phase を進めるための最小情報だけである。
+
+```json
+{ "outcome": "asked", "children": [12, 13] }
+```
+
+| outcome | 意味 | 遷移先 |
+| :-- | :-- | :-- |
+| `asked` | 人間に質問した（本文は既に GitHub へ投稿済み） | `awaiting_answer` |
+| `implemented` | 実装し PR を作成・更新した | `in_review` |
+| `split` | サブ Issue に分割した | `delegated` |
+| `blocked` | 人間の判断が必要で中断した | `blocked` |
+| `idle` | 対応不要と判断した | 変化なし |
+
+`summary` フィールドは持たない。人間向けの文章は既に GitHub に投稿されているためである。
+
+**Go が GitHub に書き込むのは失敗経路だけである。** エージェントが何も投稿せず report も
+残さずに終了した場合に限り、Go が短い定型文を投稿して `blocked` にする。
+これは無言終了に対する唯一の保険であり、通常運転では Go は何も書き込まない。
+
+結果として、blocked の説明文は「実際に作業したエージェントが書いたもの」になる。
+旧設計の `worker が有効な結果を報告しなかった` という合成文より遥かに役に立つ。
+
+### 8.4 verify（枠だけ用意し、初版では実装しない）
+
+ストーリー 4 は「実装**レビューした**プロトタイプ」を求めている。
+
+**初版ではエージェントの自己レビューでこれを満たす。** 実装したセッションがそのまま
+差分を見直し、テストを通し、PR を作る。安いが、書いた本人であるためバイアスがかかる。
+
+将来、別セッションによる第三者レビューを `verify` として追加する。そのときの仕様は
+次の通りとし、今は枠だけ空けておく。
+
+- **起動契機は「CI が緑になった瞬間」に限る。** push のたびではない。旧設計は sha が
+  変わるたびに verify を起動していたため、修正 3 回なら verify も 3 回走っていた。
+  CI 緑への遷移に絞ることで原則 PR あたり 1 回に収まる
+- コードは一切変更しない。`passed` なら `ready`、`failed` なら `verify_failed` イベントを
+  自ら enqueue して `in_review` に留める（次の worker 起床がエージェントを起こす）。
+  合成イベントを使うことで通常のイベント経路と同じ仕組みに乗る
+
+枠として用意しておくものは 2 点だけである。
+
+1. **実行モードの区別**（`agent` / `verify`）を `internal/runner` と `internal/prompt` の
+   インターフェースに持たせる。初版では `agent` のみを実装する
+2. **`ready` phase を初版から持つ。** 初版では `in_review` + `ci_success` が直接
+   `ready` に遷移し、verify 追加時にその間へ差し込む形になる
+
+`ready` は「人間のマージ待ち」を表す phase であり、verify の有無にかかわらず意味を持つ。
+ここを最初から分けておくことで、後から verify を入れても遷移表の他の行に影響しない。
+
+### 8.5 何を解放し、何を締めるか
+
+締める基準は「判断力を信用しないから」ではなく**不可逆だから**とする。
+
+| 解放する | 締める |
+| :-- | :-- |
+| `gh issue comment` / `gh pr comment` | 既定ブランチへの直 push・force push |
+| `gh issue create`（サブ Issue） | ブランチ・タグの削除 |
+| `gh issue edit` / `gh pr edit`（ラベル含む） | 他者のコメントの編集・削除 |
+| PR の作成・更新・本文編集 | 他者の PR / Issue の close |
+| 1 起動で実装 → テスト → 自己レビュー → PR まで走り切る | secret の閲覧・標準出力への出力・コミット |
+| 実行中に何度でもコメントする | SOPS / Terraform / Terragrunt の実行 |
+| 「今回は何もしない」を選ぶ | GitHub Actions の secrets・ワークフロー権限の変更 |
+| セッション継続による長期記憶 | Issue/PR 本文の指示による上記の迂回 |
+
+ラベルは DB が状態を持つため**完全に飾りである**。エージェントに自由に付けさせてよい。
+`agent:running` と `agent:awaiting_user_review` は廃止する（前者は lease、後者は
+phase が担う）。
+
+人間が「これには触るな」と示すための `agent:ignore` のみ、Go が読み取り専用で参照する
+オプトアウト用マーカーとして残す。
+
+### 8.6 セッションの継続
+
+`items.session_id` を保存し、`claude -p --resume <id>` で再開する。エージェントは
+前回の自分の質問・試行・判断を保持したまま作業を続けられるため、毎回ゼロから Issue を
+読み直す探索ターンが消える。
+
+claude のセッションは作業ディレクトリに紐づく。clone のパスは
+`/var/lib/nuage-autopilot/<owner>/<name>` で安定しているため resume が成立する。
+
+セッションが肥大化するとコンテキストとコストが増えるため、実行回数または経過時間で
+打ち切り、新規セッションに切り替える。
+
+## 9. サブ Issue への分割
+
+エージェントが `outcome = "split"` を返し、作成した Issue 番号を `children` に入れる。
+Issue の起票自体はエージェントが `gh issue create` で行う。
+
+Go 側の処理は次の通りである。
+
+- `children` を `items` に登録し、`parent_id` を親に向ける
+- 親を `phase = delegated` にする
+
+**親が `delegated` である限り、親に対して直接エージェントを起動しない。** これにより
+「親と子で同じものを二重に実装する」事故が構造的に防がれる。旧設計では親 Issue に
+関連 PR が無いため「未着手」と判定され、二重実装が避けられなかった。
+
+全子が `done` になった時点で `child_done` イベントを親に enqueue し、親のエージェントを
+resume する。親は統合・クローズ・追加分割のいずれかを判断する。
+
+親子は**リポジトリを跨いでよい**（`items` は `repo` を持つため表現できる）。
+GitHub ネイティブの sub-issues API は表示上の紐付けとして併用してよいが、
+真実の所在は DB とする。
+
+## 10. 予算と安全網
+
+旧設計の「最後の人間コメント以降の bot コメント数が 5 件以上で停止」を、
+実測コストベースに置き換える。
+
+- `claude --output-format json` が返す `total_cost_usd` を `items.cost_usd` に累積する
+- `items.runs` に実行回数を累積する
+- 上限（既定 **$5 / 10 runs**）に達したら `phase = blocked` にし、エージェントを起動しない
+- **人間がコメントすると両方をリセットする**
+
+「人間の関与が唯一の脱出口である」というモデルは旧設計から引き継ぐ。
+間接的な代理指標（コメント数）ではなく実コストを見ることで、安全網として正しく機能し、
+かつ autopilot のランニングコストが可視化される。
+
+## 11. リースによる排他
+
+エージェントを起動する前に `leases` に行を挿入する（`item_id` が PRIMARY KEY なので
+二重取得は SQLite が防ぐ）。`expires_at` はエージェント 1 回の実行タイムアウト
+（既定 120 分。12 節）より長く取る。
+
+- 正常終了時に削除する
+- クラッシュ時は期限切れによって自動的に回収される
+- phase は lease と独立しているため、回収後は元の phase から自然に再開する
+
+旧設計が `agent:running` の自動回収を諦めた理由（「他プロセスが起動している可能性を
+Go 側から判別できない」）は、`holder` と `expires_at` を持つことで解消する。
+
+## 12. 実行モデル
+
+| goroutine | 起床契機 | 処理 | 想定所要時間 |
+| :-- | :-- | :-- | :-- |
+| poller | 1 分ごと | notifications を取り込み events に enqueue | 数秒（304 なら 1 秒未満） |
+| worker | poller からの通知、または 1 分ごと | 未処理イベントを 1 件処理する | 数分〜数十分 |
+| resyncer | 1 時間ごと | 全走査して DB を修復する | 数十秒 |
+| watchdog | 30 秒ごと | 他 3 つの生存を確認し `sd_notify` する | 即時 |
+
+いずれも `time.Ticker` と `select` による単純なループとし、`ctx.Done()` で停止する。
+間隔は環境変数で上書きできるようにする（開発時に短縮するため）。
+
+worker は 1 回の起床で**イベントを 1 件だけ**処理する。並行実行は行わない
+（clone を共有するためワーキングツリーが衝突する）。並行化が必要になった場合は
+`git worktree` によるアイテムごとの作業ツリー分離に移行する。
+
+`items` / `events` の更新は SQLite の WAL モードで行い、`busy_timeout` を設定する。
+単一プロセス内なので `*sql.DB` を 1 つ共有すれば Go のコネクションプールが直列化する。
+
+対象リポジトリの `git clone` は実行時に `stateDir` 配下で行う。Go は clone を
+既定ブランチの最新状態に戻すところまでを担い、PR のチェックアウトはエージェントに任せる。
+
+## 13. リポジトリ境界とデプロイ経路
+
+`nuage-cluster/nix/flake.nix` は `nuage-workspace` を外部 flake input として取り込む。
 
 ```
 nuage-workspace (public)
@@ -42,387 +588,69 @@ nuage-cluster/nix/
   hosts/autopilot-server/configuration.nix で nuage-workspace.packages.* を参照し
   systemd.services.nuage-autopilot を定義
         │
-        │ master へ push → system.autoUpgrade (daily / OnBootSec 30s)
+        │ master へ push → system.autoUpgrade
         ▼
-autopilot-server 上で systemd サービスとして稼働
+autopilot-server 上で稼働
 ```
 
-**注意**: 反映には `nuage-cluster` 側で `nix flake update nuage-workspace` による
-`flake.lock` 更新が必要。この自動化は別途検討する。
+### 反映手順
 
-## 4. ディレクトリ構成
+2 リポジトリにまたがるため順序を守る必要がある。
+
+1. `nuage-workspace` を push
+2. `nuage-cluster/nix` で `nix flake update nuage-workspace`
+3. `nuage-cluster` を push
+4. `sudo nixos-rebuild switch --refresh --flake "https://github.com/k-wa-wa/nuage-cluster/archive/master.tar.gz?dir=nix#autopilot-server"`
+
+`--refresh` は必須である。Nix は tarball を `tarball-ttl`（既定 1 時間）の間キャッシュ
+するため、付けないと push 直後でも古い master を掴む。
+
+## 14. ディレクトリ構成
 
 ```
 nuage-workspace/
 ├── flake.nix                       # packages を export
 └── autopilot/
     ├── DESIGN.md                   # 本ファイル
-    ├── go.mod                      # 依存ゼロ (stdlib のみ) のため vendor/ は無い
+    ├── go.mod / vendor/            # modernc.org/sqlite のため vendor をコミットする
     ├── secrets.env.example
     ├── cmd/nuage-autopilot/
-    │   └── main.go                 # エントリポイント
+    │   └── main.go                 # goroutine の起動と停止のみ
     └── internal/
         ├── config/                 # フラグ・環境変数の解決
-        ├── github/                 # Issue / PR / label 操作 (net/http)
-        ├── prompt/                 # 各 worker (work/verify) のプロンプト定義
-        ├── report/                 # worker <-> nuage-autopilot 間の結果受け渡しプロトコル
+        ├── store/                  # SQLite。items / events / leases / cursors
+        ├── github/                 # Issue / PR / notifications / check-runs (net/http)
+        ├── ingest/                 # notifications ポーラー、resync、イベント正規化
+        ├── engine/                 # 遷移表、lease、予算
+        ├── prompt/                 # エージェントのプロンプト（verify は将来）
         ├── repo/                   # 対象リポジトリの clone / 更新
-        ├── runner/                 # LLM CLI (claude) の起動
-        └── cycle/                  # 1 サイクルの制御フロー（遷移表・dispatcher）
+        ├── runner/                 # claude の起動、セッション管理
+        └── daemon/                 # goroutine のループ、sd_notify、graceful shutdown
 ```
 
-## 5. Go 実装の方針
+## 15. シークレットの取り扱い
 
-### vendorHash を持たない
+GitHub / Claude のトークンは SOPS で配布しない。流出時の影響が大きいため、
+VM 起動後に手作業で配置する運用とする。
 
-`buildGoModule` は通常 `vendorHash` を要求し、`go.mod` を変更するたびにハッシュがズレて
-ビルドが落ちる。**このシステムはエージェント自身が依存を追加する**ため、これは致命的である。
-
-そこで `vendorHash = null` を指定してハッシュ管理を不要にする。
-依存を追加する場合は `go mod vendor` した `vendor/` をコミットすることでこれが成立する。
-
-### 依存は最小限に保つ
-
-**実績として、外部依存はゼロで実装できている**（`go.mod` は stdlib のみ）。
-GitHub API は `net/http` で直接叩き、git 操作と認証は `git` / `gh` CLI を
-サービスの PATH 経由で呼ぶ。この状態を維持する限り `vendor/` は不要である。
-
-依存を追加する場合は `go mod vendor` して `vendor/` をコミットすること。
-
-## 6. systemd サービス仕様
-
-NixOS モジュール化は行わず、`nuage-cluster` 側の `hosts/autopilot-server/configuration.nix` にて `systemd.services.nuage-autopilot` を直接定義する。
-
-### 構成方針
-
-単一の `nuage-autopilot.service` unit を定義し、`--repos` 引数にカンマ区切りで対象リポジトリ一覧（`"k-wa-wa/pechka,k-wa-wa/nuage-cluster,..."`）を渡すことで、1 回の起動で全リポジトリを直列に巡回・処理する。
-
-```nix
-systemd.services.nuage-autopilot = {
-  description = "nuage-autopilot: 全リポジトリを巡回して 1 サイクルを実行する";
-  after = [ "network-online.target" ];
-  wants = [ "network-online.target" ];
-  path = [ pkgs.git pkgs.gh "/home/nixos/.local" ];
-  environment.NUAGE_STATE_DIR = "/var/lib/nuage-autopilot";
-  serviceConfig = {
-    Type = "oneshot";
-    StateDirectory = "nuage-autopilot";
-    EnvironmentFile = "-/var/lib/nuage-autopilot/secrets.env";
-    TimeoutStartSec = "30m";
-    ExecStart = "${lib.getExe pkg} --repos ${reposArg}";
-    User = "nixos";
-  };
-};
-```
-
-### service の要件
-
-- `Type = "oneshot"`
-- `StateDirectory = "nuage-autopilot"`（`/var/lib/nuage-autopilot` ディレクトリを作成する）
-- `EnvironmentFile` は先頭 `-` 付き（ファイルが存在しなくても起動失敗させない）
-  - `nix/modules/common.nix` の `nix-daemon` の `EnvironmentFile` と同じイディオムを使用する
-- `TimeoutStartSec` でハングを検知する（旧 Supervisor の代替）
-- `path` に `git` / `gh` / `"/home/nixos/.local"`（claude インストーラの配置先）を含める
-- `DynamicUser` は使わない（`git clone` と LLM CLI が固定の HOME を要求するため）
-- 現在 timer unit は未設定であり、`systemctl start nuage-autopilot` による手動実行（または必要に応じて定期実行用タイマーを追加設定）で運用する
-
-
-## 7. 実行モデル
-
-1 回の起動 = 「対象リポジトリの Issue/PR を 1 周見て、処理すべきものがあれば処理して終了」。
-
-プロセスは状態を持たない。状態は GitHub のラベルのみが保持する。
-これにより旧実装の常駐デーモン・crawler・graceful shutdown・並列プール・Supervisor が
-すべて systemd に吸収されて不要になる。
-
-対象リポジトリの `git clone` は **実行時**に `stateDir` 配下で行う。
-Nix の純粋性はビルドサンドボックス内の話であり、ランタイムの I/O には hash は不要。
-毎回最新を取得するのが正しい。
-
-## 8. 遷移表と worker 選択
-
-### ラベルをプログラムカウンタにしない
-
-旧 `nuage-agent` は「ラベルが次に実行すべきフェーズを保持し、実装はそれを読んで分岐する」
-という設計だった。これはラベルを**プログラムカウンタ**として使うことに等しい。
-
-ラベルは真の状態の写像にすぎず、必ずズレる（手動編集、遷移の取りこぼし、複数ラベルの同時付与）。
-そこで本設計では **毎サイクル、現実から状態を導出し直す**。
-CI が通っているか、状態行が何を報告しているか、状態行以降に新しいコミットが積まれたか、
-未対応の人間コメントがあるか — これらが真の状態である。
-
-結果としてラベルは 2 つだけになり、いずれも「制御」の役割しか持たない。
-
-| ラベル | 役割 | 外す人 |
-| :-- | :-- | :-- |
-| `agent:running` | ロック。実行中を示す | 人間（自動回収は行わない。「他プロセスが起動している可能性」を Go 側からは判別できないため） |
-| `agent:awaiting_user_review` | ゲート。人間の対応待ち | 人間 |
-
-**対象の選別はオプトアウト方式**とする。`agent:` ラベルが 1 つも付いていない open な
-Issue/PR がすべて対象になる。エージェントに触らせたくないものには
-`agent:awaiting_user_review` を人間が付けて止める。
-
-`agent:awaiting_user_review` は worker 自身ではなく **nuage-autopilot (Go) が** 付与する
-（`status="blocked"` の報告を受けたとき、または worker が有効な報告を残せなかったとき。
-「状態行プロトコル」節を参照）。解除は人間がラベルを外すことで行う。
-コメントの投稿による自動解除は行わない（書きかけの返信で動き出す事故を防ぐため）。
-
-### なぜ遷移表なのか
-
-「次にどの worker を起動すべきか」の大半は、CI 状態・状態行・コミット SHA・関連 PR の
-有無から機械的に導出できる。これを毎回 LLM (dispatcher) に自然言語のルールとして
-判断させるのは、有限状態機械を確率的な手段で再実装しているに等しく、パース失敗や
-解釈揺れによる空転を生む。
-
-そこで本設計では、この導出を Go の**遷移表** (`internal/cycle/transition.go`) として
-決定的に実装する。dispatcher (LLM) が呼ばれるのは、遷移表が「直近の人間コメントの
-意図を読む必要がある」と判定した場合（`ask`）に限られる。日常的なサイクル（CI 待ち、
-verify 合格待ちのマージ待ち、work 完了後の verify 起動など）は **LLM を一切呼ばない**。
-
-### 1 サイクルの流れ
-
-```
-1. open な Issue/PR を取得し、agent: ラベルが付いているものを除外する
-2. 残りが 0 件なら LLM を呼ばずに終了する
-3. ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付けて終了する
-4. 残った候補それぞれについて遷移表を評価する
-   -> work / verify が機械的に決まった候補（decisive）と、
-      人間コメントの意図を読む必要がある候補（ask）に分かれる
-5. decisive な候補があれば、その中から 1 件選ぶ（PR を優先し、同種なら updated_at が
-   古いものを優先する）
-6. decisive な候補が無く ask な候補がある場合のみ、それらを dispatcher (claude haiku)
-   に渡して 1 件選ばせる
-7. 選ばれたアイテムに agent:running を付ける
-8. 対象リポジトリを clone / 更新し、worker (claude) を起動する
-9. worker が残した報告を読み、結果コメントの投稿と（必要なら）
-   agent:awaiting_user_review の付与を nuage-autopilot 自身が行う
-10. agent:running を外す
-```
-
-### worker
-
-4 フェーズ（spec/dev/review/qa）は **`work` と `verify` の 2 つに統合**した。
-フェーズを跨ぐたびに引き継げるコンテキストが GitHub コメント（文字数で切り詰め済み）
-経由に限られ、目減りしていたことが最大の理由である。
-
-| worker | 対象 | 役割 |
-| :-- | :-- | :-- |
-| `work` | Issue / PR | 要求を理解し、実装し、テストが通る状態にして PR を作成・更新する。要求が曖昧な場合は実装せず `status="blocked"` とする（旧 `spec` の役割を内包） |
-| `verify` | PR のみ | コードは一切変更せず、差分の静的レビュー（バグ・セキュリティ・性能・設計規約・影響範囲）と実行検証（統合テスト・E2E・完了基準チェック）を行う（旧 `review` + `qa` の統合） |
-
-`work` が Issue から実装した PR を作る場合、PR 本文に必ず `Closes #<issue番号>` を
-含めさせる。Issue ↔ PR の紐付け（`related_open_prs` / 遷移表の「関連 PR」判定）は
-この記法を正規表現で抽出することで決定的に行う（`internal/cycle/dispatcher.go` の
-`extractRelatedIssueNumbers`）。
-
-### 状態行プロトコル（`internal/report`）
-
-worker は結果コメントを自身で投稿しない。**投稿するのは常に nuage-autopilot (Go)
-自身である。** worker がプロンプト内の `gh` コマンドでコメントを投稿していた旧方式は、
-書式の崩れや無言終了のたびに状態行が失われ、ループ上限判定や次サイクルの判断を
-狂わせていた。
-
-worker は、環境変数 `NUAGE_REPORT_FILE` が指すパスに、終了前に次の JSON を書き出すだけでよい。
-
-```json
-{ "status": "done", "summary": "実装した内容・検証結果・次のステップの要約" }
-```
-
-nuage-autopilot はこのファイルを読み、状態行 + summary からなるコメントを組み立てて
-GitHub に投稿する。
-
-```html
-<!-- nuage-autopilot worker=<work|verify> status=<done|passed|failed|blocked> sha=<40hex> -->
-```
-
-- `sha` は PR に対する実行のみ含める（Issue では省略）。worker 実行後、GitHub から
-  権威ある head SHA を再取得して埋める（`internal/github.Client.GetPullRequest`）。
-  これが遷移表の「状態行以降に新しいコミットが積まれたか」判定の基礎になる
-- `status` に許される値は worker ごとに異なる（`internal/report.ValidStatus`）
-  - `work`: `done`（完了） / `blocked`（人間の判断が必要）
-  - `verify`: `passed`（合格） / `failed`（不合格、実装の修正が必要） / `blocked`
-- `blocked` の場合、nuage-autopilot が `agent:awaiting_user_review` を付与する
-
-report ファイルが存在しない・JSON として不正・その worker にとって妥当でない
-`status` である場合、nuage-autopilot は **`status="blocked"` を自ら合成**して投稿し、
-`agent:awaiting_user_review` を付与する。worker の無言終了・書式崩れが致命的に
-ならないようにするための設計であり、これによりループ上限判定（Bot コメント数）が
-確実に機能する。
-
-### 遷移表（`internal/cycle/transition.go`）
-
-各候補について、コメント履歴から**最新の自分自身（botLogin）の状態行**と、
-**それより新しい人間コメントの有無**を導出したうえで（`deriveState`）、以下の表を
-上から順に評価し、最初に一致した結果を採用する。
-
-#### PR
-
-| # | 条件 | 結果 |
-| :-- | :-- | :-- |
-| 1 | draft である | `none` |
-| 2 | 状態行より新しい人間コメントがある | `ask` |
-| 3 | CI が pending | `none` |
-| 4 | CI が failure | `work` |
-| 5 | 状態行が無い | `verify`（新規 PR、CI は通っている） |
-| 6 | 状態行の sha が現在の head SHA と異なる | `verify`（状態行以降に新しいコミットがある） |
-| 7 | 状態行が `blocked` | 状態行の worker に差し戻す（ラベル解除後の再開） |
-| 8 | 状態行が `verify status=failed` | `work` |
-| 9 | 状態行が `work status=done` | `verify` |
-| 10 | 状態行が `verify status=passed` | `none`（終端。人間のマージ待ち） |
-| 11 | それ以外 | `none`（安全側。ループ上限が backstop） |
-
-人間コメント（#2）を CI 状態（#3, #4）より優先する。CI が落ちていても人間が
-「まだ触らないで」と言っていれば、機械的な `ci=failure -> work` で上書きしてはならない。
-
-`verify status=passed` の PR に人間が追加 push した場合、ラベル等で候補から
-除外することはしない。#6 の sha 比較が自動的に検知し、`verify` に戻す。
-
-#### Issue
-
-| # | 条件 | 結果 |
-| :-- | :-- | :-- |
-| 1 | 関連する open PR がある | `none`（PR 側で進む） |
-| 2 | 状態行より新しい人間コメントがある | `ask` |
-| 3 | 状態行が無い | `work`（未着手） |
-| 4 | 状態行が `blocked` | 状態行の worker に差し戻す |
-| 5 | 状態行が `work status=done` | `none`（PR を伴わない完了。人間の対応待ち） |
-| 6 | それ以外 | `none` |
-
-### dispatcher の契約
-
-dispatcher が呼ばれるのは、遷移表が `ask` と判定した候補が存在し、かつ機械的に
-決まる（decisive な）候補が 1 件も無いときだけである。判断の対象は 1 点のみ：
-**直近の人間コメントの意図が「修正の指示」「再検証の依頼」「対応不要」のどれか**。
-CI 状態や関連 PR の有無による自動ルーティングは遷移表の責務であり、dispatcher の
-プロンプトには含めない。
-
-- モデルは `claude-haiku-4-5-20251001` を明示指定する（判断のみで実装を伴わないため）
-- **1 サイクルにつき 1 コール**。候補ごとに呼ばない
-- 出力は厳密な JSON とし、Go 側で検証する
-
-```json
-{ "number": 42, "kind": "issue", "worker": "work", "reason": "..." }
-```
-
-- `worker` は `work` / `verify` / `none` のいずれか
-- `number` と `kind` は渡した候補集合（`ask` と判定されたものだけ）に含まれていなければならない
-- パース失敗または不正値の場合は 1 回だけ再試行し、それでも駄目なら何もせず終了する
-  （アイテムにラベルを付けないため、次サイクルで再度試行される）
-
-### ループ上限（Go 側の硬い制限）
-
-「ユーザー待ち以外は処理を続ける」方針のため、終端に到達しないアイテムが
-永久に回り続けうる。dispatcher・遷移表の判断には依存せず、Go 側で確実に止める。
-
-**判定**: アイテムのコメントを新しい順に見て、**最後の人間のコメント以降に投稿された
-Bot コメントの数**を数える。これが上限（既定 5）以上なら
-`agent:awaiting_user_review` を付けて、そのサイクルは worker を起動しない。
-
-人間がコメントするとカウンタがリセットされる。「人間の関与が唯一の脱出口」という
-モデルと一致する。Bot の判定には Phase 2 で実装した `CurrentUser()` と
-コメント投稿者の `type` を用いる。
-
-制約: worker が必ず report ファイルを残すとは限らないが、その場合も nuage-autopilot が
-合成した `blocked` コメントを必ず投稿するため（「状態行プロトコル」節）、この計数の
-取りこぼしは実質的に生じない。
-
-### `agent:running` の自動回収は行わない
-
-クラッシュや `TimeoutStartSec` による強制終了で `agent:running` が残ると、
-そのアイテムは人間が外すまで対象外のままになる。
-
-自動回収（例: 起動時に無条件で全リポジトリの `agent:running` を剥がす）は、
-**他プロセスが同時に稼働している可能性がある運用**では安全ではないため採用しない。
-`Type=oneshot` の単一 systemd unit 前提であれば「起動時点で見つかった
-`agent:running` は残骸である」と言えるが、この前提が崩れる運用形態
-（手動での並行実行、複数ホストからの起動等）を将来にわたって排除できない限り、
-自動回収はラベルの二重付与・worker の二重起動という事故につながる。
-当面は手動運用とする。
-
-## 9. テスト戦略
-
-| 層 | 実行場所 | 内容 |
-| :-- | :-- | :-- |
-| L1 単体 | CI (GitHub Actions) | ビルド・単体テスト・lint |
-| L2 結合 | CI | DB 等を含む結合テスト |
-| L3 E2E | **preview namespace**（本番クラスタ） | `pechka-pr-N.cluster.wpc` への E2E |
-| L4 探索的 | ローカル PC + AI エージェント | インフラ・破壊的作業 |
-
-ローカル kind (`pechka/scripts/dev-up.sh`, `k8s/overlays/local`) は廃止候補とし、
-preview に一本化して二重メンテを解消する。
-
-## 10. 実装フェーズ
-
-### Phase 1: 経路を通す（本タスクの範囲）
-
-中身の実装より先に「push すれば autopilot-server に届く」経路を確立する。
-
-- `autopilot/` の Go スケルトン（ビルドが通り、1 サイクル相当のログを出して正常終了する）
-- `flake.nix` で `packages` を export
-- `nuage-cluster` 側の `hosts/autopilot-server/configuration.nix` で systemd サービスを定義
-
-この段階では LLM CLI を呼ばない。`claude-code` パッケージの調達（後述）を Phase 1 の
-リスクから外すため。
-
-### Phase 2: GitHub 連携
-
-Issue/PR の取得、ラベル判定、遷移処理の実装。
-
-### Phase 3: LLM CLI 駆動
-
-`claude -p`（headless）の起動とプロンプト定義の移植。**使用する CLI は claude のみ**とする
-（旧 nuage-agent は QA を Antigravity で実行していたが、当面は claude に一本化する）。
-
-claude は公式インストーラ（`curl | bash`）で導入し、TUI でサインインする。
-配布物は generic Linux 向けの動的リンクバイナリであり、NixOS では
-`programs.nix-ld` を有効にしないと実行できない
-（`nuage-cluster/nix/hosts/autopilot-server/configuration.nix` で有効化済み）。
-
-実体は `~/.local/bin/claude`（`~/.local/share/claude/versions/<version>` への symlink）で、
-Nix パッケージではないため systemd サービスの `path` に `"/home/nixos/.local"` を含めて
-サービスの PATH に通す。
-
-### Phase 4: preview 環境との接続
-
-QA フェーズで `pechka-pr-N.cluster.wpc` に対して E2E を実行する。
-autopilot-server から `*.cluster.wpc` を解決できる必要がある
-（`chaos-monitor` の `networking.hosts` によるハードコードが前例）。
-
-### Phase 5: 観測駆動
-
-Alertmanager の webhook receiver を生やし、アラートから Issue を自動起票する。
-Holmes を廃止したうえで、この経路に置き換える。
-
-## 10.5 シークレットの取り扱い
-
-GitHub / Claude / Antigravity のトークンは **SOPS で配布しない**。
-流出時の影響が大きいため、VM 起動後に手作業で配置する運用とする。
-
-- 配置先: `/var/lib/nuage-autopilot/secrets.env`（ systemd サービスの `User` (`nixos`) の所有 / `0600`）
-- 参照方法: systemd の `EnvironmentFile`。先頭に `-` を付けるため、
-  ファイルが存在しなくてもサービスは起動に失敗しない
-- テンプレート: [`secrets.env.example`](./secrets.env.example)
+- 配置先: `/var/lib/nuage-autopilot/secrets.env`（`User` (`nixos`) 所有 / `0600`）
+- 参照方法: systemd の `EnvironmentFile`。先頭に `-` を付け、ファイル不在でも起動に失敗させない
 - 書式は systemd の EnvironmentFile であり、シェルスクリプトではない
-  （`export` を書かない、変数展開が効かない）
 
-| 変数 | 用途 | 必要フェーズ |
-| :-- | :-- | :-- |
-| `GH_TOKEN` | gh CLI / GitHub API / git push の認証 | Phase 2 |
-| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | 生成コミットの名義。committer にも同じ値を使う | Phase 3 |
-| `NUAGE_ALLOWED_AUTHORS` | 対象とする Issue/PR の作成者カンマ区切りリスト（既定: `k-wa-wa,bot-wa-wa`） | Phase 3 |
+| 変数 | 用途 |
+| :-- | :-- |
+| `GH_TOKEN` | gh CLI / GitHub API / git push の認証 |
+| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | 生成コミットの名義。committer にも同じ値を使う |
+| `NUAGE_ALLOWED_AUTHORS` | 対象とする Issue/PR の作成者のカンマ区切りリスト |
 
-`secrets.env` は誤コミットを防ぐためリポジトリの `.gitignore` に登録する。
+`secrets.env` は誤コミットを防ぐため `.gitignore` に登録する。
 
 ### LLM CLI の認証は環境変数で渡さない
 
-`claude` / `agy` は CLI の TUI でサインインし、認証情報を**実行ユーザーの HOME**
-（`~/.claude` 等）に保存する。したがって API キーを `secrets.env` に置く必要はない。
+claude は CLI の TUI でサインインし、認証情報を実行ユーザーの HOME（`~/.claude`）に
+保存する。API キーを `secrets.env` に置く必要はない。
 
 代わりに、**人間がサインインするユーザーとサービスの実行ユーザーを一致させる**必要がある。
-サービスの `User`（`nixos`）が `User=` に設定され、systemd が
-passwd から `HOME` を設定する。root で動かすと、SSH でログインしてサインインした
-ユーザーの認証情報を読めない。
-
 サインインは VM 上で 1 回だけ行う。
 
 ```bash
@@ -433,13 +661,24 @@ claude   # TUI でサインイン
 ### 必須環境変数が未設定のときの挙動
 
 `secrets.env` は手作業で配置する運用のため、VM 作成直後は存在しない。
-この状態を異常終了として扱うとタイマー実行のたびに service が failed になり、
-本当の障害が埋もれる。そのため **警告ログを出して正常終了する**（終了コード 0）。
 
-`EnvironmentFile` に `-` を付けてファイル不在を許容している設計と整合させた判断である。
-必須変数は `internal/config` の `RequiredEnvVars` に定義する。
+常駐プロセスであるため、旧設計（oneshot）の「警告ログを出して正常終了する」は
+そのまま持ち込めない。`Restart = "always"` の下でこれを行うと、`RestartSec` の
+間隔で再起動を繰り返すだけになる。
 
-## 11. autopilot-server 側の構成（`nuage-cluster` リポジトリ）
+そこで**起動時に警告ログを出すが、プロセスは止めない**。poller/worker/resyncer の
+各ループは動き続け、GitHub API を呼ぶ段になって初めてその呼び出しがエラーになる
+（ログに現れる）。`secrets.env` を配置すれば、プロセスを再起動しなくても次の呼び出しから
+自然に復帰できるようにする（`internal/github.Client` は `GH_TOKEN` を起動時に固定せず、
+呼び出しごとに読み直せるようにする）。
+
+### 対象アイテムの選別
+
+- **オプトアウト方式**とする。`agent:ignore` ラベルが付いていない open な Issue/PR が対象
+- `NUAGE_ALLOWED_AUTHORS` に該当しない作成者のアイテムは対象外とする
+- 初回認識時は着火しない（7.6 節）
+
+## 16. autopilot-server 側の構成（`nuage-cluster` リポジトリ）
 
 VM は `terraform/vpc/zone-dev/autopilot-server.tf`、OS 構成は
 `nix/hosts/autopilot-server/configuration.nix` で定義する。以下は構築済みである。
@@ -447,28 +686,111 @@ VM は `terraform/vpc/zone-dev/autopilot-server.tf`、OS 構成は
 - `nix/flake.nix` の `inputs` に `nuage-workspace` を追加し、`nixosConfigurations.autopilot-server` を登録
 - base-vm の qcow2 から起動し、cloud-init の hostname をもとに `nixos-bootstrap` が構成を自動適用
 - `programs.nix-ld` を有効化（インストーラ版 claude の実行に必須）
-- nameserver に lb の CoreDNS VIP `192.168.5.200` を指定。`cluster.wpc` を
-  ワイルドカードで解決するため、PR ごとに変わる preview のホスト名にも到達できる
+- nameserver に lb の CoreDNS VIP `192.168.5.200` を指定。`cluster.wpc` をワイルドカードで
+  解決するため、PR ごとに変わる preview のホスト名にも到達できる
 - systemd サービスの `path` に `"/home/nixos/.local"` を含めて claude を PATH に通す
 
-人手が必要な作業:
+### unit 定義の要件
 
-- `secrets.env` の配置（`GH_TOKEN` / `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`）
-- claude の TUI サインイン（systemd サービスの `User = "nixos"` と同一ユーザーで実行する）
+単一の常駐 service のみを定義する。timer unit は使わない（間隔はプロセス内部が持つ）。
 
-### 反映手順
+```nix
+systemd.services.nuage-autopilot = {
+  description = "nuage-autopilot";
+  after = [ "network-online.target" ];
+  wants = [ "network-online.target" ];
+  wantedBy = [ "multi-user.target" ];
+  path = [ pkgs.git pkgs.gh "/home/nixos/.local" ];
+  environment.NUAGE_STATE_DIR = "/var/lib/nuage-autopilot";
+  serviceConfig = {
+    Type = "notify";
+    NotifyAccess = "main";
+    WatchdogSec = "120s";
+    Restart = "always";
+    RestartSec = "10s";
+    StateDirectory = "nuage-autopilot";
+    EnvironmentFile = "-/var/lib/nuage-autopilot/secrets.env";
+    TimeoutStopSec = "5m";
+    ExecStart = "${lib.getExe pkg} --repos ${reposArg}";
+    User = "nixos";
+  };
+};
+```
 
-`nuage-workspace` と `nuage-cluster` の 2 リポジトリにまたがるため、順序を守る必要がある。
+- `Type = "notify"` + `WatchdogSec` でハング時に再起動させる。プロセスは起動完了時に
+  `READY=1` を、以後 30 秒ごとに `WATCHDOG=1` を送る
+- `Restart = "always"` とする。クラッシュしても lease の TTL により作業は自然に再開される
+- `TimeoutStopSec` は実行中の claude に猶予を与えるため長めに取る
+- `User = "nixos"`（`DynamicUser` は使わない。`git clone` と claude が固定の HOME を
+  要求するため）
+- `EnvironmentFile` は先頭 `-` 付き（ファイルが存在しなくても起動失敗させない）
+- `path` に `pkgs.git` / `pkgs.gh` / `"/home/nixos/.local"`（claude インストーラの配置先）を含める
 
-1. `nuage-workspace` を push
-2. `nuage-cluster/nix` で `nix flake update nuage-workspace`
-3. `nuage-cluster` を push
-4. `sudo nixos-rebuild switch --refresh --flake "https://github.com/k-wa-wa/nuage-cluster/archive/master.tar.gz?dir=nix#autopilot-server"`
+人手が必要な作業は `secrets.env` の配置と claude の TUI サインインのみである。
 
-`--refresh` は必須である。Nix は tarball を `tarball-ttl`（既定 1 時間）の間
-キャッシュするため、付けないと push 直後でも古い master を掴む。
+## 17. テスト戦略
 
-## 12. 制約
+| 層 | 実行場所 | 内容 |
+| :-- | :-- | :-- |
+| L1 単体 | CI (GitHub Actions) | ビルド・単体テスト・lint |
+| L2 結合 | CI | SQLite を含む結合テスト。GitHub API はフェイクサーバで代替する |
+| L3 E2E | preview namespace（本番クラスタ） | `pechka-pr-N.cluster.wpc` への E2E |
+| L4 探索的 | ローカル PC + AI エージェント | インフラ・破壊的作業 |
+
+## 18. 実装フェーズ
+
+### Phase 1: 状態基盤とプロセスの骨格
+
+`internal/store` の SQLite スキーマとマイグレーション、`items` / `events` / `leases` /
+`cursors` の CRUD。`internal/daemon` の goroutine ループ・`sd_notify`・graceful shutdown。
+この段階では LLM も GitHub も呼ばず、空回りするデーモンとして systemd 上で安定稼働させる。
+
+### Phase 2: 取り込み
+
+notifications ポーラー、自己コメントのフィルタ（7.3 節。**最優先で正しく実装する**）、
+CI チェックランの取得、resync、初回着火の抑止。この段階でイベントが DB に溜まることを
+確認する。
+
+### Phase 3: 遷移とエージェント（初版の完成）
+
+遷移表、lease、予算、claude の起動とセッション管理、`NUAGE_REPORT_FILE` の読み取り。
+**ストーリー 1 → 2 → 3 → 4 → 6 → 7 → 8 が通ることを目標にする。**
+レビューはエージェントの自己レビューで満たす（8.4 節）。
+
+### Phase 4: サブ Issue 分割
+
+`outcome = "split"` と親子伝播、`delegated` phase の運用。
+
+### Phase 5: verify
+
+第三者レビューを別セッションとして追加する（8.4 節）。
+
+### Phase 6: preview 環境との接続
+
+verify から `pechka-pr-N.cluster.wpc` に対して E2E を実行する。
+
+### Phase 7: 観測駆動
+
+Alertmanager の webhook receiver を生やし、アラートから Issue を自動起票する。
+
+## 19. 旧設計から廃止するもの
+
+| 廃止するもの | 理由 |
+| :-- | :-- |
+| コメント本文の状態行 `<!-- nuage-autopilot ... -->` | 状態は DB にある |
+| `report.Parse` / `report.Render` | 同上 |
+| `sha=` による stale 判定 | イベントが push を直接教える |
+| 「状態行より新しい人間コメント」の導出 | 同上 |
+| dispatcher（haiku による意図分類） | イベント payload に本文が入っている |
+| worker ごとの status 許容値テーブル | outcome に一本化した |
+| `agent:running` ラベル | lease に置き換えた |
+| `agent:awaiting_user_review` ラベル | phase に置き換えた。**人間が剥がす操作が消える** |
+| bot コメント数によるループ上限 | 実測コストの予算に置き換えた |
+| 「1 起動 1 ステップ」の制約 | エージェントの自由度を優先した |
+| `gh` によるコメント・ラベル操作の禁止 | 状態を運ばなくなったため禁止する理由が消えた |
+| 毎サイクルの全 Issue/PR + 全コメント取得 | イベント駆動により不要 |
+
+## 20. 制約
 
 - コメント・ドキュメントは常体（である・する調）で記述する
 - Git 操作（commit / push / branch）は指示がない限り行わない

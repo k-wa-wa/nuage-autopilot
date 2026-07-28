@@ -33,9 +33,9 @@ const Command = "claude"
 // 手元で確認済みであり、json 形式が持つ cost/duration 等のメタデータよりも、
 // 応答本文をそのまま構造化ログの行として残せる単純さを優先した。
 //
-// 一方 dispatcher は判断結果を Go 側でパースする必要があるため、Options.ExtraArgs で
-// `--output-format json --json-schema <schema>` を追加指定する（internal/cycle/dispatcher.go
-// 参照）。`claude --help` で確認した限り、--json-schema を付けると応答の JSON ラッパの
+// 一方、構造化出力が必要な呼び出し元は Options.ExtraArgs で
+// `--output-format json --json-schema <schema>` を追加指定できる。
+// `claude --help` で確認した限り、--json-schema を付けると応答の JSON ラッパの
 // 直下に "structured_output" フィールドとしてスキーマに沿った JSON が渡ってくる。
 // これは "result" フィールド（応答本文の文字列。--json-schema 無指定時は Markdown の
 // コードフェンスで囲まれることがある）よりも厳密で扱いやすいため、dispatcher は
@@ -73,8 +73,7 @@ type Options struct {
 	// ExtraEnv は claude サブプロセスに渡す追加の環境変数（"KEY=VALUE" 形式）である。
 	// buildEnv() が組み立てる環境の後ろに追加するため、同名キーがあれば ExtraEnv が
 	// 勝つ（exec.Cmd.Env は重複キーがある場合、後ろの値が使われる）。
-	// worker が結果を書き出す先を伝える NUAGE_REPORT_FILE を渡すために用意した
-	// （internal/cycle/executor.go 参照）。
+	// worker が結果を書き出す先を伝える NUAGE_REPORT_FILE を渡すために用意した。
 	ExtraEnv []string
 
 	// Logger は stdout/stderr を構造化ログとして出力する先。nil の場合 slog.Default()
@@ -108,9 +107,9 @@ type Result struct {
 // 入力であるプロンプトや環境変数の値そのものは対象外である）。
 //
 // 終了コードが 0 以外であっても、それ自体はこの関数のエラーとしない
-// （Result.Success = false を返す）。呼び出し側（internal/cycle）は「LLM が
-// タスクに失敗した」ことを次サイクルでの再試行対象として扱うべきものであり、
-// nuage-autopilot 自体の異常とは区別する。プロセスの起動に失敗した場合や
+// （Result.Success = false を返す）。呼び出し側は「LLM がタスクに失敗した」ことを
+// 再試行対象として扱うべきものであり、nuage-autopilot 自体の異常とは区別する。
+// プロセスの起動に失敗した場合や
 // 実行ファイルが見つからない場合など、claude自体を実行できなかった場合にのみ
 // error を返す。
 func Run(ctx context.Context, opts Options) (Result, error) {

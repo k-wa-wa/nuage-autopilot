@@ -30,9 +30,8 @@ func lastPageURL(h http.Header) (string, bool) {
 // 取得・統合し、時系列順（昇順）にソートして返す。
 //
 // コメントが 100 件（1 ページ）を超える場合、Link ヘッダの rel="last" を辿って
-// 最新のページを追加で取得する。ループ上限の判定（looplimit.go）と dispatcher /
-// 状態行の解釈（internal/cycle/transition.go）はいずれも「直近のコメント」を見て
-// 判断するため、古いページだけでは最新の状態を見誤る。
+// 最新のページを追加で取得する。イベント取り込み・予算判定はいずれも「直近の
+// コメント」を見て判断するため、古いページだけでは最新の状態を見誤る。
 func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR bool) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d", repo, number, listPerPage)
 

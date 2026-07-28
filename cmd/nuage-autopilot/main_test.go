@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
-	"net/http"
-	"net/http/httptest"
+	"os"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRun_VersionFlag(t *testing.T) {
@@ -30,43 +32,92 @@ func TestRun_MissingRepo(t *testing.T) {
 		t.Fatalf("run(nil) exit code = %d, want 2", code)
 	}
 	if stderr.Len() == 0 {
-		t.Fatalf("stderr is empty, want error message about missing --repo")
+		t.Fatalf("stderr is empty, want error message about missing --repos")
 	}
 }
 
-func TestRun_RepoLogsCycleCompletion(t *testing.T) {
-	// このテストは実際の GitHub API には一切到達しない。cycle.Run は internal/github
-	// 経由で GitHub REST API を呼び出すため、main の統合テストとして成立させるには
-	// httptest.Server を立て、NUAGE_GITHUB_API_BASE_URL で参照先を差し替える。
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/repos/k-wa-wa/pechka/issues", "/repos/k-wa-wa/pechka/pulls":
-			_, _ = w.Write([]byte(`[]`))
-		default:
-			http.Error(w, "not found", http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	t.Setenv("NUAGE_STATE_DIR", "/tmp/nuage-autopilot-test")
-	t.Setenv("NUAGE_GITHUB_API_BASE_URL", server.URL)
-	t.Setenv("GH_TOKEN", "test-token")
-	t.Setenv("GIT_AUTHOR_NAME", "nuage-autopilot")
-	t.Setenv("GIT_AUTHOR_EMAIL", "nuage-autopilot@example.invalid")
+// TestRun_StartsDaemonAndStopsOnSIGTERM は run() が daemon.Run へ正しく配線され、
+// SIGTERM を受けて正常終了することを確認する。
+//
+// run() は内部で signal.NotifyContext(os.Interrupt, syscall.SIGTERM) を使って
+// 常駐する（Phase 1 以降の設計。oneshot だった旧実装と異なり、1 サイクルで
+// 戻ってくることはない）。テストプロセス自身に SIGTERM を送ることで終了させる。
+func TestRun_StartsDaemonAndStopsOnSIGTERM(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("NUAGE_STATE_DIR", stateDir)
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
 
 	var stdout, stderr bytes.Buffer
+	var mu sync.Mutex // stdout/stderr への書き込みと読み取りを race 検出器から守る
 
-	code := run([]string{"--repos", "k-wa-wa/pechka"}, &stdout, &stderr)
+	code := make(chan int, 1)
+	go func() {
+		mu.Lock()
+		out, errw := &stdout, &stderr
+		mu.Unlock()
+		c := run([]string{"--repos", "k-wa-wa/pechka"}, syncWriter{&mu, out}, syncWriter{&mu, errw})
+		code <- c
+	}()
 
-	if code != 0 {
-		t.Fatalf("run(--repo) exit code = %d, want 0 (stderr: %s)", code, stderr.String())
+	// daemon.Run が起動し、signal.NotifyContext の登録が完了するまでの猶予。
+	// store.Open は SQLite を WebAssembly として初回コンパイルするため、CPU 負荷が
+	// 高い環境では時間がかかることがあり、余裕を持たせている。
+	deadline := time.After(15 * time.Second)
+	for {
+		mu.Lock()
+		started := strings.Contains(stdout.String(), "nuage-autopilot starting")
+		mu.Unlock()
+		if started {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("daemon did not log a startup message in time")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal(SIGTERM): %v", err)
+	}
+
+	select {
+	case got := <-code:
+		if got != 0 {
+			mu.Lock()
+			t.Fatalf("run() exit code = %d, want 0 (stderr: %s)", got, stderr.String())
+			mu.Unlock()
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("run() did not return after SIGTERM")
+	}
+
+	mu.Lock()
 	out := stdout.String()
-	for _, want := range []string{"k-wa-wa/pechka", "/tmp/nuage-autopilot-test", "cycle completed"} {
+	mu.Unlock()
+	for _, want := range []string{"k-wa-wa/pechka", stateDir, "shutdown signal received"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout = %q, want it to contain %q", out, want)
 		}
 	}
+}
+
+// syncWriter は複数 goroutine から安全に書き込める io.Writer である。
+// テストのメイン goroutine が stdout/stderr のバッファを読みながら、
+// run() を実行する別 goroutine が同時に書き込むため必要になる。
+type syncWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (s syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
