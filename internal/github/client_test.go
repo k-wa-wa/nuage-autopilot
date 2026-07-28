@@ -150,7 +150,7 @@ func TestListComments(t *testing.T) {
 		}
 	})
 
-	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3)
+	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3, true)
 	if err != nil {
 		t.Fatalf("ListComments() error = %v", err)
 	}
@@ -171,7 +171,7 @@ func TestListComments_IncludesReviews(t *testing.T) {
 		}
 	})
 
-	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3)
+	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3, true)
 	if err != nil {
 		t.Fatalf("ListComments() error = %v", err)
 	}

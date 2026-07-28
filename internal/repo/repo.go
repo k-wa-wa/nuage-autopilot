@@ -23,9 +23,10 @@ import (
 type Option func(*options)
 
 type options struct {
-	remoteURL  string
-	gitCommand string
-	ghCommand  string
+	remoteURL         string
+	gitCommand        string
+	ghCommand         string
+	skipUpdateIfExist bool
 }
 
 // WithRemoteURL は clone/fetch に使う remote URL を上書きする。
@@ -58,22 +59,20 @@ func WithGHCommand(cmd string) Option {
 	}
 }
 
+// WithSkipUpdateIfExist は既に clone 済みのリポジトリが存在する場合に、
+// fetch / checkout / reset などのリモート最新化処理をスキップするかどうかを指定する。
+func WithSkipUpdateIfExist(skip bool) Option {
+	return func(o *options) {
+		o.skipUpdateIfExist = skip
+	}
+}
+
 // EnsureClone は stateDir 配下に repoName（"owner/name" 形式）のローカル clone を
 // 用意し、そのパスを返す。
 //
 // 未 clone の場合は新規に clone する。既に clone 済みの場合は fetch した上で、
 // リモートの既定ブランチへ checkout -B ＋ reset --hard ＋ clean -fd を行い、
-// ローカルの状態をリモートの既定ブランチに一致させる。これは、前回のサイクルが
-// クラッシュ等で異常終了し、作業ブランチのチェックアウトや未コミットの変更を
-// 残したまま終わっていた場合でも、新しいサイクルが常にクリーンな状態から
-// 開始できるようにするための安全策である（DESIGN.md には明記されていないが、
-// 本実装で必要と判断して追加した挙動である）。
-//
-// 認証は GH_TOKEN を用いるが、`git clone`/`git fetch` の URL やログにトークンを
-// 残さないため、`gh auth setup-git` で git の credential helper を gh CLI に委譲する。
-// gh は資格情報を要求された時点で GH_TOKEN（環境変数）または保存済みの認証情報を
-// 用いて供給するため、トークン自体が git の設定ファイルや remote URL に書き込まれる
-// ことはない。
+// ローカルの状態をリモートの既定ブランチに一致させる。
 func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName string, opts ...Option) (string, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -98,6 +97,13 @@ func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName st
 	}
 
 	localPath := filepath.Join(stateDir, owner, name)
+
+	if isGitRepo(localPath) {
+		if cfg.skipUpdateIfExist {
+			logger.Debug("skipping update for existing clone", "repo", repoName, "path", localPath)
+			return localPath, nil
+		}
+	}
 
 	defaultBranch, err := remoteDefaultBranch(ctx, cfg.gitCommand, cfg.remoteURL)
 	if err != nil {
@@ -140,9 +146,8 @@ func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName st
 // EnsureWorkspace は allRepos に指定されたすべてのリポジトリを stateDir 配下に
 // clone / 最新化し、同時に主リポジトリ (targetRepo) のローカルパスを返す。
 //
-// 手元 PC の開発環境（マルチワークスペース）と同様に、同一 owner 配下に各リポジトリが
-// 兄弟ディレクトリとして並ぶ構造（例: stateDir/owner/repo-a, stateDir/owner/repo-b）が
-// 自動的に維持される。
+// 主リポジトリ (targetRepo) は常に最新化を行うが、兄弟リポジトリ (allRepos のうち targetRepo 以外)
+// については、ローカル clone が既に存在する場合は無駄な fetch/reset をスキップする。
 func EnsureWorkspace(ctx context.Context, logger *slog.Logger, stateDir, targetRepo string, allRepos []string, opts ...Option) (string, error) {
 	if len(allRepos) == 0 {
 		allRepos = []string{targetRepo}
@@ -150,7 +155,11 @@ func EnsureWorkspace(ctx context.Context, logger *slog.Logger, stateDir, targetR
 
 	var targetPath string
 	for _, r := range allRepos {
-		p, err := EnsureClone(ctx, logger, stateDir, r, opts...)
+		memberOpts := opts
+		if r != targetRepo {
+			memberOpts = append([]Option{WithSkipUpdateIfExist(true)}, opts...)
+		}
+		p, err := EnsureClone(ctx, logger, stateDir, r, memberOpts...)
 		if err != nil {
 			return "", fmt.Errorf("repo: ensure clone for workspace member %s: %w", r, err)
 		}

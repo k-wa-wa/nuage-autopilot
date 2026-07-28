@@ -142,4 +142,3 @@ func TestAwaitingUserReviewNote_KindBranching(t *testing.T) {
 	prGot := awaitingUserReviewNote(prCtx)
 	mustContainAll(t, prGot, `gh pr edit 42 --add-label "agent:awaiting_user_review"`)
 }
-

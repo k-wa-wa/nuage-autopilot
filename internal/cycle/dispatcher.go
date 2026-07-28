@@ -272,7 +272,7 @@ func workerSupportsKind(worker string, kind itemKind) bool {
 	}
 }
 
-var reRelatedIssue = regexp.MustCompile(`(?i)(?:closes|fixes|resolves)\s+#(\d+)`)
+var reRelatedIssue = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)`)
 
 func extractRelatedIssueNumbers(body string) []int {
 	matches := reRelatedIssue.FindAllStringSubmatch(body, -1)
@@ -292,10 +292,11 @@ func extractRelatedIssueNumbers(body string) []int {
 	return res
 }
 
-// buildDispatchCandidates は cycle.Run が組み立てた候補アイテムと、事前に取得済みの
-// コメント一覧（ループ上限判定と使い回す。二重に GitHub API を叩かない）から、
-// dispatcher に渡す DispatchCandidate のスライスを組み立てる。
-func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Comment, botLogin string) []DispatchCandidate {
+// buildIssuePRLinks は全 open アイテム（全 Issue + 全 PR）を走査し、
+// PR の Body から関連 Issue 番号を抽出して Issue 番号 -> 関連 PR 番号リストのマップを構築する。
+// フィルタリング（ラベル除外等）前の全アイテムから計算することで、除外された PR でも
+// 関連 Issue への紐付けが維持されるようにする。
+func buildIssuePRLinks(items []Item) map[int][]int {
 	issueToPRs := make(map[int][]int)
 	for _, it := range items {
 		if it.Kind == kindPullRequest {
@@ -304,6 +305,13 @@ func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Com
 			}
 		}
 	}
+	return issueToPRs
+}
+
+// buildDispatchCandidates は cycle.Run が選定した候補アイテムと、事前計算された Issue-PR 紐付けマップ、
+// およびコメント一覧から dispatcher に渡す DispatchCandidate のスライスを組み立てる。
+func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Comment, botLogin string, relatedPRs map[int][]int) []DispatchCandidate {
+	issueToPRs := relatedPRs
 
 	out := make([]DispatchCandidate, 0, len(items))
 	for _, it := range items {
@@ -419,7 +427,7 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 	b.WriteString("## 判断の指針\n")
 	b.WriteString("- 候補一覧には、agent: 接頭辞のラベルが付いていない open な Issue/PR のみが含まれている。\n")
 	b.WriteString("- related_open_prs が存在する Issue には、原則として重ねて dev を割り当ててはならない。既存の PR 側の進捗（review や qa）を優先すること。\n")
-	b.WriteString("- PR の CI 状態 (ci_status): pending または failure の場合、QA (qa) を割り当ててはならない。failure の場合は開発 (dev) に差し戻し、pending の場合は CI の完了を待つため worker を \"none\" にすること。ci_status が success または none の場合のみ QA を進めてよい。\n")
+	b.WriteString("- PR の CI 状態 (ci_status): failure の場合は開発 (dev) に差し戻すこと。pending の場合はその PR を今回の選択対象から外し、他の候補から選ぶこと（他に選ぶべき候補が無い場合に限り none とする）。qa を割り当ててよいのは ci_status が success または none の場合のみである。\n")
 	b.WriteString("- 直近のコメントが人間からのものであれば、その内容を踏まえて次の worker を判断する。\n")
 	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、上記の状態行およびコメント内容から次に必要な worker を決定する。\n")
 	b.WriteString("- コメントが無い、または着手されていない新規の Issue には spec を、まだレビューを受けていない新規の PR には review を割り当てるのが基本である。\n")

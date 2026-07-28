@@ -69,6 +69,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
 	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Repos: cfg.Repos, Logger: logger}
 
+	// 指定された各リポジトリについて 1 サイクルを実行する。
+	// なお、複数リポジトリの並行・並列処理については将来的に goroutine 等での並列実行化を検討する。
 	var hasError bool
 	for _, repo := range cfg.Repos {
 		if ctx.Err() != nil {

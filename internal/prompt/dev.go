@@ -121,8 +121,11 @@ GitHub Pull Request #%[4]d (タイトル: 「%[5]s」) のレビュー指摘に�
 3. **修正内容のプッシュ**
    ローカルテストが完全に通過したら、変更をコミットしてリモートにプッシュする（通常はPRブランチにそのまま push する）。
    プッシュ完了後、PRの概要欄のチェックリストを更新し、今回対応完了した項目に「- [x]」 のチェックが入っている状態にすること。
-   長文によるシェルエスケープのエラーを防ぐため、PRの概要欄を更新する際は必ず一時ファイルを用いて更新・削除すること。
-   コマンド例（PR概要欄を更新する場合）: 「echo "[更新したPR本文と完了チェックリスト]" > pr_body.md && gh pr edit %[4]d --body-file pr_body.md && rm pr_body.md」
+   コマンド例（PR概要欄を更新する場合）:
+   「cat << 'EOF' > /tmp/nuage_pr_body_%[4]d.md
+[更新したPR本文と完了チェックリスト]
+EOF
+gh pr edit %[4]d --body-file /tmp/nuage_pr_body_%[4]d.md && rm -f /tmp/nuage_pr_body_%[4]d.md」
 
 ---
 

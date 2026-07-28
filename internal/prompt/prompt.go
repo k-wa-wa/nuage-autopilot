@@ -79,6 +79,8 @@ func awaitingUserReviewNote(ctx Context) string {
 const commonExecutionRules = `## 実行モデル（非対話・無人実行）
 - この起動は headless の 1 回きりの実行であり、時間で強制終了される。
 - カレントディレクトリの親ディレクトリには、他に関連する複数のリポジトリ（例: nuage-cluster, nuage-monitoring-stack, pechka, bare-web-proxy 等）が兄弟ディレクトリとして配置されている可能性がある。他リポジトリに依存する変更を行う場合は、そちらの AGENTS.md も参照し、整合性を保つこと。
+- 他リポジトリへの変更は当該リポジトリで別の Pull Request として起票すること。カレントリポジトリの PR に他リポジトリの変更を混ぜてはならない。
+- 他リポジトリへの追従が必要だが今回のスコープで実施しない場合は、当該リポジトリに Issue を起票し（gh issue create --repo <owner/name>）、結果コメントにその Issue 番号を記載すること。
 - 人間からの応答を対話的に待つことはできないため、質問で終わる無言終了は絶対にしてはならない。
 - 作業完了時または中断時には、必ず現在の状態・実施した内容・検証結果・次のステップを Issue / PR にコメントとして書き残すこと。
 - 1 回の起動で進めるのは 1 ステップのみでよい。次に何をするかは別プロセス (dispatcher) が次サイクルで判断するため、フェーズをまたいで作業を続ける必要は無い。`
@@ -100,7 +102,7 @@ func reportingNote(ctx Context, worker string) string {
 	}
 	return fmt.Sprintf(`## 結果の報告（必須）
 成否にかかわらず、終了する前に必ず対象へ結果コメントを 1 件だけ投稿すること。無言で終了してはならない。
-結果コメントの 1 行目は、必ず次の形式の状態行とすること。散文は 2 行目以降に書く。
+結果コメントの 1 行目は、必ず次の形式の状態行とすること（status= には以下 4 つのうち該当する 1 つのみを記載すること）。散文は 2 行目以降に書く。
 
 <!-- nuage-autopilot worker=%[1]s status=<passed|failed|done|blocked> -->
 
@@ -109,5 +111,10 @@ func reportingNote(ctx Context, worker string) string {
 - done:    仕様策定・実装など、担当した作業そのものを完了した
 - blocked: 人間の判断が必要で中断した（この場合のみ agent:awaiting_user_review を付与する）
 
-投稿コマンド: 「%[2]s %[3]d --body "[1行目の状態行と、2行目以降の報告内容]"」`, worker, verb, ctx.Number)
+投稿コマンド:
+「cat << 'EOF' > /tmp/nuage_report_%[3]d.md
+<!-- nuage-autopilot worker=%[1]s status=<passed|failed|done|blocked> -->
+（報告内容）
+EOF
+%[2]s %[3]d --body-file /tmp/nuage_report_%[3]d.md && rm -f /tmp/nuage_report_%[3]d.md」`, worker, verb, ctx.Number)
 }

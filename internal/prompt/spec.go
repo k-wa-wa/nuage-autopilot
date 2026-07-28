@@ -33,15 +33,21 @@ gh issue edit %[1]d --body-file /tmp/issue_body_%[1]d.txt && rm -f /tmp/issue_bo
    ### パターンB: 大規模なタスク（分割が必要な場合）
    スコープが広く、複数の独立した機能追加や大きなリファクタリングを含むため、1回の開発サイクル（1つのPR）で実装するのが難しいと判断した場合は、タスクを分割して起票する。
    - 親Issueの本文を、全体のPRDと「分割されたサブIssueのチェックリスト」で更新する:
-     「gh issue edit %[1]d --body "[全体仕様PRD]
+     「cat << 'EOF' > /tmp/issue_body_%[1]d.txt
+[全体仕様PRD]
 
 ## サブタスク一覧
 - [ ] [Sub-Task] <子タスク1のタイトル>
-- [ ] [Sub-Task] <子タスク2のタイトル>"」
+- [ ] [Sub-Task] <子タスク2のタイトル>
+EOF
+gh issue edit %[1]d --body-file /tmp/issue_body_%[1]d.txt && rm -f /tmp/issue_body_%[1]d.txt」
    - 分割した各サブタスクについて、個別に新しい子Issueを起票する。この際、**子Issueの概要欄（Body）にも必ず「- [ ]」 形式の具体的な完了基準チェックリストを記載すること**。
-     コマンド: 「gh issue create --title "[Sub-Task] <子タスクタイトル>" --body "親Issue: #%[1]d
+     「cat << 'EOF' > /tmp/sub_issue_body_%[1]d.txt
+親Issue: #%[1]d
 
-<具体的な仕様および - [ ] 形式の完了基準チェックリスト>"」`
+<具体的な仕様および - [ ] 形式の完了基準チェックリスト>
+EOF
+gh issue create --title "[Sub-Task] <子タスクタイトル>" --body-file /tmp/sub_issue_body_%[1]d.txt && rm -f /tmp/sub_issue_body_%[1]d.txt」`
 
 // BuildSpec は spec worker 向けのプロンプトを組み立てる。
 func BuildSpec(ctx Context) string {

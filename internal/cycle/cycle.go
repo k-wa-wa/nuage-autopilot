@@ -90,8 +90,11 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	}
 
 	// サービス利用ラベルをあらかじめ冪等に作成し、gh CLI 等によるラベル付与エラーを防ぐ。
-	_ = client.CreateLabel(ctx, repo, LabelRunning)
-	_ = client.CreateLabel(ctx, repo, LabelAwaitingUserReview)
+	for _, l := range []string{LabelRunning, LabelAwaitingUserReview} {
+		if err := client.CreateLabel(ctx, repo, l); err != nil {
+			logger.Warn("failed to ensure label exists", "repo", repo, "label", l, "error", err.Error())
+		}
+	}
 
 	issues, err := client.ListOpenIssues(ctx, repo)
 	if err != nil {
@@ -109,6 +112,10 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	for _, p := range prs {
 		items = append(items, pullRequestToItem(p))
 	}
+
+	// 候補の絞り込み前に、全 open アイテムから Issue ↔ PR の紐付けマップを作成しておく。
+	// フィルタで除外される PR （awaiting_user_review 付き等）も含めて紐付けを維持するため。
+	relatedPRs := buildIssuePRLinks(items)
 
 	// (1) 候補の絞り込み:
 	// - agent: ラベルが 1 つでも付いているアイテムは対象外（オプトアウト方式）。
@@ -141,7 +148,7 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	var validCandidates []Item
 	for i := range candidates {
 		it := candidates[i]
-		comments, err := client.ListComments(ctx, repo, it.Number)
+		comments, err := client.ListComments(ctx, repo, it.Number, it.Kind == kindPullRequest)
 		if err != nil {
 			logger.Error("failed to list comments for candidate; skipping item for this cycle",
 				"repo", repo, "number", it.Number, "error", err.Error())
@@ -189,7 +196,7 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	}
 
 	// (4) dispatcher を 1 サイクル 1 コールだけ呼ぶ。
-	decision, ok, err := dispatcher.Dispatch(ctx, repo, buildDispatchCandidates(candidates, commentsByNumber, botLogin))
+	decision, ok, err := dispatcher.Dispatch(ctx, repo, buildDispatchCandidates(candidates, commentsByNumber, botLogin, relatedPRs))
 	if err != nil {
 		return result, fmt.Errorf("cycle: dispatch: %w", err)
 	}

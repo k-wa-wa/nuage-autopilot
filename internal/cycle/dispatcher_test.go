@@ -280,7 +280,7 @@ func TestBuildDispatchCandidates_SortsTruncatesAndLimitsComments(t *testing.T) {
 		},
 	}
 
-	got := buildDispatchCandidates(items, comments, "nuage-autopilot")
+	got := buildDispatchCandidates(items, comments, "nuage-autopilot", buildIssuePRLinks(items))
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
@@ -316,9 +316,69 @@ func TestBuildDispatchCandidates_ShortBodyIsNotTruncated(t *testing.T) {
 	items := []Item{
 		{Kind: kindIssue, Number: 1, Title: "t", Author: "alice", Body: "short body"},
 	}
-	got := buildDispatchCandidates(items, nil, "nuage-autopilot")
+	got := buildDispatchCandidates(items, nil, "nuage-autopilot", buildIssuePRLinks(items))
 	if got[0].Body != "short body" {
 		t.Fatalf("Body = %q, want unchanged short body", got[0].Body)
+	}
+}
+
+func TestExtractRelatedIssueNumbers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []int
+	}{
+		{"closes", "Closes #10", []int{10}},
+		{"close", "Close #11", []int{11}},
+		{"closed", "Closed #12", []int{12}},
+		{"fixes", "Fixes #20", []int{20}},
+		{"fix", "Fix #21", []int{21}},
+		{"fixed", "Fixed #22", []int{22}},
+		{"resolves", "Resolves #30", []int{30}},
+		{"resolve", "Resolve #31", []int{31}},
+		{"resolved", "Resolved #32", []int{32}},
+		{"multiple", "Fixes #40, Resolves #41", []int{40, 41}},
+		{"none", "This PR fixes nothing", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractRelatedIssueNumbers(tt.body)
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractRelatedIssueNumbers(%q) = %v, want %v", tt.body, got, tt.want)
+			}
+			for i, v := range got {
+				if v != tt.want[i] {
+					t.Errorf("got[%d] = %d, want %d", i, v, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBuildIssuePRLinks_PreservesExcludedPRs(t *testing.T) {
+	// 全 open アイテム（フィルタ前）
+	allItems := []Item{
+		{Kind: kindIssue, Number: 10, Title: "Issue 10"},
+		{Kind: kindPullRequest, Number: 43, Title: "PR 43", Body: "Closes #10", Labels: []string{"agent:awaiting_user_review"}},
+	}
+
+	links := buildIssuePRLinks(allItems)
+	if len(links[10]) != 1 || links[10][0] != 43 {
+		t.Fatalf("buildIssuePRLinks() = %+v, want map[10:[43]]", links)
+	}
+
+	// 候補（PR 43 が agent:awaiting_user_review で除外された状態）
+	candidates := []Item{
+		{Kind: kindIssue, Number: 10, Title: "Issue 10"},
+	}
+
+	got := buildDispatchCandidates(candidates, nil, "bot", links)
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if len(got[0].RelatedPRs) != 1 || got[0].RelatedPRs[0] != 43 {
+		t.Fatalf("candidate RelatedPRs = %v, want [43]", got[0].RelatedPRs)
 	}
 }
 

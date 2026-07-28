@@ -176,8 +176,8 @@ Go 側はこの付与に関与しない。解除は人間がラベルを外す�
 7. 終了したら agent:running を外す
 ```
 
-dispatcher へは Issue/PR の**本文と直近のコメント履歴**を渡す。
-番号・種別・タイトルだけでは「仕様が固まっているか」「レビューが通ったのか落ちたのか」を
+dispatcher へは Issue/PR の**本文・直近のコメント履歴・CI 状態 (`ci_status`)・関連オープン PR (`related_open_prs`)** を渡す。
+番号・種別・タイトルだけでは「仕様が固まっているか」「レビューが通ったのか落ちたのか」「CI が通過しているか」を
 判別できず、ルーティングを誤るためである。
 
 ただし **clone はしない**。リポジトリの中身を読む必要があるのは worker であり、
@@ -214,6 +214,21 @@ dispatcher が柔軟に選べる以上、一般レビューと設計レビュー
 | `dev` | ブランチを切り実装し、テスト通過まで自己修復して PR を作成する |
 | `review` | バグ・セキュリティ・性能に加え、設計規約・影響範囲を検証する |
 | `qa` | preview 環境に対する E2E を含む最終検証を行う |
+
+### 状態行プロトコル
+
+worker と dispatcher の間では、結果コメントの 1 行目に埋め込まれる状態行コメントを共通の契約プロトコルとして扱う。
+
+```html
+<!-- nuage-autopilot worker=<worker_name> status=<passed|failed|done|blocked> -->
+```
+
+- `passed`:  検証・レビューに合格した
+- `failed`:  検証・レビューに不合格であり、実装の修正が必要である
+- `done`:    仕様策定・実装など、担当した作業そのものを完了した
+- `blocked`: 人間の判断が必要であり、作業を中断した（`agent:awaiting_user_review` を付与する）
+
+dispatcher は最新コメントの状態行を最優先で参照し、直前の worker の成果および成否（例: `review` の `status=passed` → 次は `qa`、`status=failed` → 次は `dev`）を判定する。
 
 ### ループ上限（Go 側の硬い制限）
 
@@ -313,6 +328,7 @@ GitHub / Claude / Antigravity のトークンは **SOPS で配布しない**。
 | :-- | :-- | :-- |
 | `GH_TOKEN` | gh CLI / GitHub API / git push の認証 | Phase 2 |
 | `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | 生成コミットの名義。committer にも同じ値を使う | Phase 3 |
+| `NUAGE_ALLOWED_AUTHORS` | 対象とする Issue/PR の作成者カンマ区切りリスト（既定: `k-wa-wa,bot-wa-wa`） | Phase 3 |
 
 `secrets.env` は誤コミットを防ぐためリポジトリの `.gitignore` に登録する。
 
