@@ -42,10 +42,11 @@ func TestBotCommentsSinceLastHuman(t *testing.T) {
 			want: 3,
 		},
 		{
-			name: "GitHub App bot (Type=Bot) counts even with a different login",
+			name: "other bot (Type=Bot with different login) does not count towards loop limit nor reset it",
 			comments: []github.Comment{
-				{User: human, CreatedAt: now.Add(-2 * time.Hour)},
-				{User: appBot, CreatedAt: now.Add(-1 * time.Hour)},
+				{User: human, CreatedAt: now.Add(-3 * time.Hour)},
+				{User: appBot, CreatedAt: now.Add(-2 * time.Hour)},
+				{User: bot, CreatedAt: now.Add(-1 * time.Hour)},
 			},
 			want: 1,
 		},

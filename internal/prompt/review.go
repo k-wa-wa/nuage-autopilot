@@ -3,22 +3,6 @@ package prompt
 import "fmt"
 
 // BuildReview は review worker 向けのプロンプトを組み立てる。
-//
-// DESIGN.md 8章「worker」に従い、旧 nuage-agent の ReviewGeneralAgent（バグ・
-// セキュリティ・パフォーマンス観点）と ReviewSemanticAgent（設計規約・ドキュメント
-// 同期・影響範囲観点）を 1 つの worker に統合したものである。dispatcher が
-// 柔軟に worker を選べる以上、一般レビューと設計レビューを別フェーズに分ける
-// 必然性が薄いという DESIGN.md の判断に基づく。
-//
-// 統合にあたり、両エージェントが検証していた観点はいずれも欠落させず「レビュー
-// 観点」に列挙している。旧実装は Antigravity (agy) で実行していたが、
-// DESIGN.md フェーズ3の決定（使用する CLI は claude のみ）に従い claude 向けの
-// 指示として移植している。
-//
-// DESIGN.md 8章「ディスパッチャ方式」への移行に伴い、旧実装が持っていたラベル遷移
-// （不合格時の agent:dev への差し戻し、合格時の agent:review-semantic / agent:qa への
-// 前進）の指示は取り除いた。合否はコメントで表明するのみとし、次に何をするかは
-// dispatcher がコメント内容から判断する。
 func BuildReview(ctx Context) string {
 	return fmt.Sprintf(`あなたは対象リポジトリ「%[1]s」のコードレビューエージェント (Reviewer) である。
 バグ・セキュリティ・性能に加え、設計規約・影響範囲まで含めた総合的なレビューを行うこと。
@@ -30,7 +14,15 @@ func BuildReview(ctx Context) string {
 ## 効率的な行動原則（重要）
 - **重複調査の禁止**: 「gh pr diff」 などの確認・調査コマンドを何度も繰り返し実行しないこと。
 - **無駄な試行の抑制**: コメント投稿などの操作が失敗した場合は、エラーメッセージから原因を特定し、的確なコマンドで再試行すること。
-- **セッション制限の意識**: APIセッション制限を回避するため、余計なファイル探索や冗長なコマンド実行を控え、速やかにレビューを完了すること。
+- **不要なコマンド実行の削減**: 効率的にレビューを完了すること。
+
+---
+
+%[6]s
+
+---
+
+%[7]s
 
 ---
 
@@ -52,20 +44,12 @@ GitHub Pull Request #%[3]d (タイトル: 「%[4]s」) の差分レビューを�
 - **ドキュメントの同期**: APIの追加や重要な変更に伴うREADME等のドキュメント更新の有無。
 - **影響範囲**: 既存コンポーネントに対する不要な破壊的変更や副作用の有無。
 
-## レビュー結果の処理ルール
-
-1. **修正が必要な場合 (Failed)**
-   上記いずれかの観点で指摘事項がある場合、PRにインラインまたは全体コメントで詳細な理由と修正案を投稿する。
-   - コメント投稿: 「gh pr comment %[3]d --body "[指摘内容と修正案]"」
-
-2. **問題ない場合 (Passed)**
-   すべての観点でチェックに合格した場合、PRに合格判定のコメントを投稿する。
-   - コメント投稿: 「gh pr comment %[3]d --body "[Review Result: PASSED]
-
-バグ・セキュリティ・性能、および設計規約・影響範囲のいずれの観点でもレビューをパスした。"」
-
 ---
 
 %[5]s
-`, ctx.RepoName, repoRulesNote, ctx.Number, ctx.Title, awaitingUserReviewNote(ctx))
+
+---
+
+%[8]s
+`, ctx.RepoName, repoRulesNote, ctx.Number, ctx.Title, awaitingUserReviewNote(ctx), commonExecutionRules, prohibitions, reportingNote(ctx, "review"))
 }

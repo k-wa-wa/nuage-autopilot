@@ -8,22 +8,16 @@ import "fmt"
 const devEfficiencyPrinciples = `## 効率的な行動原則（重要）
 - **重複調査の禁止**: 「git status」 や 「git log」 などの確認コマンドを何度も繰り返し実行しないこと。
 - **無駄な試行の抑制**: 同じエラーに対して単にコマンドを再実行するのではなく、エラーログから根本原因（型エラー、設定ミスなど）を特定して速やかにコードや設定ファイルを修正すること。同じアプローチで3回以上失敗した場合は、別のアプローチを検討すること。
-- **セッション制限の意識**: APIセッション制限を回避するため、無駄なファイル探索や冗長なコマンド実行を控え、効率的に実装を進めること。`
+- **不要なコマンド実行の削減**: 効率的に実装を進めること。`
 
 // devCodeVerificationProcess は実装後のローカル検証手順である。
-// 旧 nuage-agent の CODE_VERIFICATION_PROCESS をそのまま移植したもの。
-const devCodeVerificationProcess = `修正完了後、必ずローカルでテストやLintを実行する（例: 「npm test」、「npm run lint」 など）。
-   - **テスト実行時の環境依存対策**: テスト（特にVitestなど）の実行時にワーカー関連や環境起因のエラーが発生した場合は、環境に合わせたオプションを検討してエラーを回避すること。
-   - エラーが発生した場合は自律的に原因を特定して修正を繰り返すこと。
-   - 明らかに解消しない問題であれば作業を中断し、その旨 PR にコメントを記載する`
+const devCodeVerificationProcess = `修正完了後、必ずこのリポジトリのテストと Lint を実行すること。
+   - **コマンドを決め打ちにしないこと**: 対象リポジトリは Node.js とは限らない（Go / Nix / Shell / 設定のみのリポジトリもある）。AGENTS.md、README、Makefile、justfile、package.json、flake.nix、CI 定義（.github/workflows）からこのリポジトリで実際に使われているコマンドを特定して実行すること。
+   - **テストを実行せずに合格を報告してはならない**: 検証手段を特定できない場合は、その事実を結果コメントに明記したうえで status=blocked とすること。
+   - エラーが発生した場合は自律的に原因を特定して修正を繰り返す。ただし同じアプローチで 3 回以上失敗した場合は別のアプローチを検討し、それでも解消しなければ status=blocked として終了すること。`
 
 // BuildDevIssue は dev worker のうち、承認済み仕様（Issue）に基づく新規実装向けの
 // プロンプトを組み立てる。旧 nuage-agent の DevAgent#buildIssuePrompt 相当。
-//
-// DESIGN.md 8章「ディスパッチャ方式」への移行に伴い、旧実装が持っていた
-// PR作成後のラベル遷移（agent:review-general の付与・agent:dev の剥がし）の指示は
-// 取り除いた。次に何をするか（review worker に渡すかどうか）は dispatcher が
-// 毎サイクル判断する。
 func BuildDevIssue(ctx Context) string {
 	return fmt.Sprintf(`あなたは対象リポジトリ「%[1]s」の開発エージェント (DevAgent) である。
 以下の事項を踏まえてタスクに取り組むこと。
@@ -32,6 +26,14 @@ func BuildDevIssue(ctx Context) string {
 ---
 
 %[3]s
+
+---
+
+%[8]s
+
+---
+
+%[9]s
 
 ---
 
@@ -45,7 +47,7 @@ GitHub Issue #%[4]d (タイトル: 「%[5]s」) に記載された仕様に基�
 
 1. **作業ブランチの作成**
    実装を開始する前に、最新の main/master ブランチから「feature/issue-%[4]d」という新しい作業ブランチを作成する。
-   コマンド: 「git checkout -b feature/issue-%[4]d」
+   コマンド: 「git checkout -B feature/issue-%[4]d」
 
 2. **コード実装とローカル検証**
    仕様を満たすようにコードを実装・修正する。
@@ -65,14 +67,15 @@ GitHub Issue #%[4]d (タイトル: 「%[5]s」) に記載された仕様に基�
 ---
 
 %[7]s
-`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx))
+
+---
+
+%[10]s
+`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx), commonExecutionRules, prohibitions, reportingNote(ctx, "dev"))
 }
 
 // BuildDevPR は dev worker のうち、レビュー指摘や QA 不合格を受けた PR の修正対応向けの
 // プロンプトを組み立てる。旧 nuage-agent の DevAgent#buildPRPrompt 相当。
-//
-// DESIGN.md 8章への移行に伴い、旧実装が持っていたラベル遷移
-// （agent:dev の剥がし・agent:review-general の再付与）の指示は取り除いた。
 func BuildDevPR(ctx Context) string {
 	return fmt.Sprintf(`あなたは対象リポジトリ「%[1]s」の開発エージェント (DevAgent - PR修正担当) である。
 以下の事項を踏まえて、指摘された問題の修正タスクに取り組むこと。
@@ -81,6 +84,14 @@ func BuildDevPR(ctx Context) string {
 ---
 
 %[3]s
+
+---
+
+%[8]s
+
+---
+
+%[9]s
 
 ---
 
@@ -112,5 +123,9 @@ GitHub Pull Request #%[4]d (タイトル: 「%[5]s」) のレビュー指摘に�
 ---
 
 %[7]s
-`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx))
+
+---
+
+%[10]s
+`, ctx.RepoName, repoRulesNote, devEfficiencyPrinciples, ctx.Number, ctx.Title, devCodeVerificationProcess, awaitingUserReviewNote(ctx), commonExecutionRules, prohibitions, reportingNote(ctx, "dev"))
 }

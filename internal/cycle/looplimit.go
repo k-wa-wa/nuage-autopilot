@@ -32,16 +32,29 @@ func botCommentsSinceLastHuman(comments []github.Comment, botLogin string) int {
 
 	count := 0
 	for _, c := range sorted {
-		if isBotComment(c, botLogin) {
-			count++
-			continue
+		if isHumanComment(c, botLogin) {
+			break
 		}
-		break
+		if isOwnComment(c, botLogin) {
+			count++
+		}
 	}
 	return count
 }
 
-// isBotComment は c が autopilot 自身（または他の Bot）による投稿かどうかを判定する。
+// isOwnComment は c が autopilot 自身による投稿かどうかを判定する。
+// 他の Bot (dependabot, github-actions 等) の投稿を autopilot のループとして数えないようにする。
+func isOwnComment(c github.Comment, botLogin string) bool {
+	return c.User.Login == botLogin
+}
+
+// isHumanComment は c が人間による投稿かどうかを判定する。
+// リセット判定では、他の Bot を人間扱いしないよう Type != "Bot" を確認する。
+func isHumanComment(c github.Comment, botLogin string) bool {
+	return c.User.Login != botLogin && c.User.Type != "Bot"
+}
+
+// isBotComment は c が autopilot 自身または他の Bot による投稿かどうかを判定する。
 func isBotComment(c github.Comment, botLogin string) bool {
 	return c.User.Login == botLogin || c.User.Type == "Bot"
 }

@@ -353,19 +353,22 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 
 	b.WriteString("\n## 本文・コメントの読み方\n")
 	b.WriteString("- 本文は Issue/PR 作成時点の内容であり、「要求・仕様がどこまで固まっているか」（背景・要件・受け入れ基準が書かれているか、曖昧なままか）を判断する主な材料である。\n")
-	b.WriteString("- コメントは新しい順に並んでいる。直近のやり取りから「レビューが通ったのか落ちたのか」「質問への回答が付いたのか」といった現在の状態を推測すること。\n")
-	b.WriteString("- 本文・コメント本文の末尾が \"…\" で終わっている場合、文字数制限により切り詰められており、実際の内容はそれより長い。切り詰められた部分に断定的な結論が書かれている可能性があるため、末尾が \"…\" のときは「文面から読み取れる範囲では」といった留保付きで判断し、断定を避けること。\n\n")
+	b.WriteString("- コメントは新しい順に並んでいる。コメントの 1 行目が \"<!-- nuage-autopilot worker=… status=… -->\" 形式の状態行である場合、それが最も信頼できる情報である。散文の解釈より状態行を優先すること。\n")
+	b.WriteString("- 状態行の読み替え: status=passed の review の次は qa、status=failed の review/qa の次は dev、status=done の spec/dev の次はそれぞれ dev/review が基本である。\n")
+	b.WriteString("- 本文・コメント本文の末尾が \"…\" で終わっている場合、文字数制限により切り詰められているため、末尾が \"…\" のときは文面から読み取れる範囲で判断すること。\n\n")
 
 	b.WriteString("## 判断の指針\n")
+	b.WriteString("- 候補一覧には、agent: 接頭辞のラベルが付いていない open な Issue/PR のみが含まれている。\n")
 	b.WriteString("- 直近のコメントが人間からのものであれば、その内容を踏まえて次の worker を判断する。\n")
-	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、その内容（レビュー合格/不合格、検証合格/不合格、質問の投稿など）から次に必要な worker を推測する。\n")
+	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、上記の状態行およびコメント内容から次に必要な worker を決定する。\n")
 	b.WriteString("- コメントが無い、または着手されていない新規の Issue には spec を、まだレビューを受けていない新規の PR には review を割り当てるのが基本である。\n")
 	b.WriteString("- 判断がつかない場合や、着手すべき候補が無い場合は、無理に選ばず worker を \"none\" とすること。\n\n")
 
 	b.WriteString("## 出力形式\n")
-	b.WriteString("厳密な JSON のみを出力すること。\n")
-	b.WriteString(`{"number": <選んだアイテムの番号>, "kind": "issue" または "pull_request", "worker": "spec"|"dev"|"review"|"qa"|"none", "reason": "選定理由"}` + "\n")
-	b.WriteString("worker が \"none\" の場合、number と kind は候補一覧のいずれかの値をそのまま入れてよい。\n")
+	b.WriteString("指定された JSON スキーマに従って構造化出力を返すこと。散文や補足を出力に含めないこと。\n")
+	b.WriteString("- worker が \"none\" 以外の場合: number と kind は候補一覧に実在する組み合わせでなければならない。\n")
+	b.WriteString("- worker が \"none\" の場合: number と kind は省略してよい。\n")
+	b.WriteString("- reason には、どのコメント・状態行を根拠にその worker を選んだのかを簡潔に書くこと。\n")
 
 	return b.String()
 }

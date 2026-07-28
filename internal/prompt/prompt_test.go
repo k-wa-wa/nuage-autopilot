@@ -75,7 +75,7 @@ func TestBuildDevIssue_IncludesBranchAndPRInstructions(t *testing.T) {
 		"開発エージェント (DevAgent)",
 		"GitHub Issue #42",
 		"feature/issue-42",
-		"git checkout -b feature/issue-42",
+		"git checkout -B feature/issue-42",
 		"AGENTS.md",
 		"agent:awaiting_user_review",
 	)

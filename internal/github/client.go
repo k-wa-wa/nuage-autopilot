@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // DefaultBaseURL は本番の GitHub REST API のベース URL である。
@@ -62,7 +63,7 @@ func NewClient(token string, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    DefaultBaseURL,
 		token:      token,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
 		opt(c)
