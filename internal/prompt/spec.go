@@ -65,6 +65,7 @@ func BuildSpec(ctx Context) string {
 ## タスク
 GitHub Issue #%[4]d (タイトル: 「%[5]s」) の仕様定義（要件の明確化、PRDおよび受け入れ基準（Acceptance Criteria; AC）の策定）を行う。
 ターミナル環境で GitHub CLI (gh) が利用可能である。最初に必ず以下のコマンドを実行して Issue の本文および最新のコメント履歴を取得し、コンテキストを確認すること。
+すでに Issue の本文に確定した PRD や完了基準チェックリスト（- [ ] 形式）が記載されている場合は、重ねてドラフトの投稿や更新を行わず、その旨をコメントして終了すること。
 
 コマンド: 「gh issue view %[4]d --comments」
 
