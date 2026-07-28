@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,12 @@ type DispatchCandidate struct {
 	// CIStatus は PR コミットに対する CI チェックランの状態 ("success", "failure", "pending", "none") である。
 	CIStatus string
 
+	// Draft は PR が Draft 状態かどうかを表す。
+	Draft bool
+
+	// RelatedPRs はこの Issue に対するオープンな PR 番号の一覧である（Issue のみ）。
+	RelatedPRs []int
+
 	// Body は Issue/PR 本文を bodyPreviewLimit で切り詰めたものである。切り詰めが
 	// 発生した場合は truncateRunes が末尾に "…" を付与するため、dispatcher 側でも
 	// 「本文の続きが省略されている」と認識できる。
@@ -134,11 +142,16 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, repo string, candidate
 		logger = slog.Default()
 	}
 
-	prompt := buildDispatchPrompt(repo, candidates)
+	basePrompt := buildDispatchPrompt(repo, candidates)
 
 	var lastErr error
 	for attempt := 1; attempt <= dispatchMaxAttempts; attempt++ {
-		decision, err := d.callOnce(ctx, prompt, logger)
+		currentPrompt := basePrompt
+		if attempt > 1 && lastErr != nil {
+			currentPrompt += fmt.Sprintf("\n\n## 前回の失敗理由（必ず修正してください）\n前回の出力は以下のエラーにより却下されました:\n%s\n\n候補一覧とルールを再度確認し、正しい形式で出力してください。\n", lastErr.Error())
+		}
+
+		decision, err := d.callOnce(ctx, currentPrompt, logger)
 		if err == nil {
 			if verr := validateDecision(decision, candidates); verr == nil {
 				if decision.Worker == WorkerNone {
@@ -259,10 +272,39 @@ func workerSupportsKind(worker string, kind itemKind) bool {
 	}
 }
 
+var reRelatedIssue = regexp.MustCompile(`(?i)(?:closes|fixes|resolves)\s+#(\d+)`)
+
+func extractRelatedIssueNumbers(body string) []int {
+	matches := reRelatedIssue.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	var res []int
+	seen := make(map[int]bool)
+	for _, m := range matches {
+		if len(m) > 1 {
+			if num, err := strconv.Atoi(m[1]); err == nil && !seen[num] {
+				seen[num] = true
+				res = append(res, num)
+			}
+		}
+	}
+	return res
+}
+
 // buildDispatchCandidates は cycle.Run が組み立てた候補アイテムと、事前に取得済みの
 // コメント一覧（ループ上限判定と使い回す。二重に GitHub API を叩かない）から、
 // dispatcher に渡す DispatchCandidate のスライスを組み立てる。
 func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Comment, botLogin string) []DispatchCandidate {
+	issueToPRs := make(map[int][]int)
+	for _, it := range items {
+		if it.Kind == kindPullRequest {
+			for _, issueNum := range extractRelatedIssueNumbers(it.Body) {
+				issueToPRs[issueNum] = append(issueToPRs[issueNum], it.Number)
+			}
+		}
+	}
+
 	out := make([]DispatchCandidate, 0, len(items))
 	for _, it := range items {
 		comments := commentsByNumber[it.Number]
@@ -293,6 +335,8 @@ func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Com
 			UpdatedAt:      it.UpdatedAt,
 			Labels:         it.Labels,
 			CIStatus:       it.CIStatus,
+			Draft:          it.Draft,
+			RelatedPRs:     issueToPRs[it.Number],
 			Body:           truncateRunes(it.Body, bodyPreviewLimit),
 			RecentComments: summaries,
 		})
@@ -333,12 +377,19 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 		b.WriteString("(候補は無い)\n")
 	}
 	for _, c := range candidates {
-		ciInfo := ""
-		if c.Kind == kindPullRequest && c.CIStatus != "" && c.CIStatus != "none" {
-			ciInfo = fmt.Sprintf(" ci_status=%s", c.CIStatus)
+		extraInfo := ""
+		if c.Kind == kindPullRequest {
+			if c.CIStatus != "" && c.CIStatus != "none" {
+				extraInfo += fmt.Sprintf(" ci_status=%s", c.CIStatus)
+			}
+			if c.Draft {
+				extraInfo += " draft=true"
+			}
+		} else if c.Kind == kindIssue && len(c.RelatedPRs) > 0 {
+			extraInfo += fmt.Sprintf(" related_open_prs=%v", c.RelatedPRs)
 		}
 		fmt.Fprintf(&b, "- kind=%s number=%d title=%q author=%s updated_at=%s labels=%v%s\n",
-			c.Kind, c.Number, c.Title, c.Author, c.UpdatedAt.UTC().Format(time.RFC3339), c.Labels, ciInfo)
+			c.Kind, c.Number, c.Title, c.Author, c.UpdatedAt.UTC().Format(time.RFC3339), c.Labels, extraInfo)
 		if c.Body == "" {
 			b.WriteString("  本文: (無し)\n")
 		} else {
@@ -367,6 +418,7 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 
 	b.WriteString("## 判断の指針\n")
 	b.WriteString("- 候補一覧には、agent: 接頭辞のラベルが付いていない open な Issue/PR のみが含まれている。\n")
+	b.WriteString("- related_open_prs が存在する Issue には、原則として重ねて dev を割り当ててはならない。既存の PR 側の進捗（review や qa）を優先すること。\n")
 	b.WriteString("- PR の CI 状態 (ci_status): pending または failure の場合、QA (qa) を割り当ててはならない。failure の場合は開発 (dev) に差し戻し、pending の場合は CI の完了を待つため worker を \"none\" にすること。ci_status が success または none の場合のみ QA を進めてよい。\n")
 	b.WriteString("- 直近のコメントが人間からのものであれば、その内容を踏まえて次の worker を判断する。\n")
 	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、上記の状態行およびコメント内容から次に必要な worker を決定する。\n")

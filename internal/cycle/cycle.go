@@ -138,11 +138,14 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 
 	// 各候補のコメントと CI チェックラン状態を取得する。
 	commentsByNumber := make(map[int][]github.Comment, len(candidates))
+	var validCandidates []Item
 	for i := range candidates {
-		it := &candidates[i]
+		it := candidates[i]
 		comments, err := client.ListComments(ctx, repo, it.Number)
 		if err != nil {
-			return result, fmt.Errorf("cycle: list comments for %s#%d: %w", repo, it.Number, err)
+			logger.Error("failed to list comments for candidate; skipping item for this cycle",
+				"repo", repo, "number", it.Number, "error", err.Error())
+			continue
 		}
 		commentsByNumber[it.Number] = comments
 
@@ -155,28 +158,33 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 				it.CIStatus = st
 			}
 		}
+		validCandidates = append(validCandidates, it)
 	}
+	candidates = validCandidates
 
-	// (3) ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付けて
-	// 終了する。dispatcher の判断には依存せず、Go 側で確実に止める
-	// （DESIGN.md 8章「ループ上限（Go 側の硬い制限）」）。
-	var overLimit []Item
+	// (3) ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付与し、
+	// 今サイクルの dispatch 候補から除外して他の候補の検討に進む。
+	var eligibleCandidates []Item
 	for _, it := range candidates {
 		if botCommentsSinceLastHuman(commentsByNumber[it.Number], botLogin) >= LoopLimit {
-			overLimit = append(overLimit, it)
+			if err := client.AddLabel(ctx, repo, it.Number, LabelAwaitingUserReview); err != nil {
+				logger.Error("failed to add label to over-limit item",
+					"repo", repo, "issue_number", it.Number, "error", err.Error())
+			} else {
+				logger.Warn("loop limit reached; labeling for human review",
+					"repo", repo, "issue_number", it.Number, "kind", string(it.Kind), "limit", LoopLimit)
+			}
+			result.Action = ActionAwaitingUserReview
+			result.ItemKind = string(it.Kind)
+			result.ItemNumber = it.Number
+		} else {
+			eligibleCandidates = append(eligibleCandidates, it)
 		}
 	}
-	if len(overLimit) > 0 {
-		for _, it := range overLimit {
-			if err := client.AddLabel(ctx, repo, it.Number, LabelAwaitingUserReview); err != nil {
-				return result, fmt.Errorf("cycle: add %s to %s#%d: %w", LabelAwaitingUserReview, repo, it.Number, err)
-			}
-			logger.Warn("loop limit reached; labeling for human review",
-				"repo", repo, "issue_number", it.Number, "kind", string(it.Kind), "limit", LoopLimit)
-		}
-		result.Action = ActionAwaitingUserReview
-		result.ItemKind = string(overLimit[0].Kind)
-		result.ItemNumber = overLimit[0].Number
+	candidates = eligibleCandidates
+
+	if len(candidates) == 0 {
+		logger.Info("no eligible candidate remaining after filtering and loop limit check", "repo", repo)
 		return result, nil
 	}
 

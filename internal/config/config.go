@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -74,8 +75,16 @@ func Parse(args []string) (Config, error) {
 		ShowVersion:    *showVersion,
 	}
 
-	if !cfg.ShowVersion && len(cfg.Repos) == 0 {
-		return Config{}, ErrRepoRequired
+	if !cfg.ShowVersion {
+		if len(cfg.Repos) == 0 {
+			return Config{}, ErrRepoRequired
+		}
+		for _, repo := range cfg.Repos {
+			parts := strings.Split(repo, "/")
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				return Config{}, fmt.Errorf("invalid repo format %q: must be owner/name format (e.g. k-wa-wa/pechka)", repo)
+			}
+		}
 	}
 
 	return cfg, nil

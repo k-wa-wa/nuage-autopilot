@@ -11,7 +11,7 @@ import (
 // Issue の会話コメントに加えて、PR レビューコメント（GET /pulls/{n}/reviews）も
 // 取得・統合し、時系列順にソートして返す。
 func (c *Client) ListComments(ctx context.Context, repo string, number int) ([]Comment, error) {
-	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d", repo, number, listPerPage)
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d&sort=created&direction=desc", repo, number, listPerPage)
 
 	var raw []rawComment
 	if err := c.request(ctx, "GET", path, nil, &raw); err != nil {

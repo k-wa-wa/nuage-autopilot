@@ -29,6 +29,7 @@ type Item struct {
 	Labels    []string
 	HeadSHA   string
 	CIStatus  string // "success", "failure", "pending", "none"
+	Draft     bool
 	UpdatedAt time.Time
 }
 
@@ -53,6 +54,7 @@ func pullRequestToItem(p github.PullRequest) Item {
 		Body:      p.Body,
 		Labels:    p.Labels,
 		HeadSHA:   p.HeadSHA,
+		Draft:     p.Draft,
 		UpdatedAt: p.UpdatedAt,
 	}
 }

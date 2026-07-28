@@ -201,7 +201,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 func streamToLog(logger *slog.Logger, stream string, r io.Reader) []string {
 	var lines []string
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		lines = append(lines, line)
