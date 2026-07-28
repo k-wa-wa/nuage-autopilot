@@ -34,6 +34,9 @@ type DefaultLLMExecutor struct {
 	// StateDir はリポジトリの clone を置くディレクトリである（NUAGE_STATE_DIR）。
 	StateDir string
 
+	// AllRepos は StateDir 配下に事前 clone / 最新化しておくべきリポジトリ一覧である。
+	AllRepos []string
+
 	// Logger は clone/claude 実行のログ出力先。nil の場合 slog.Default() を使う。
 	Logger *slog.Logger
 }
@@ -45,9 +48,9 @@ func (e *DefaultLLMExecutor) Execute(ctx context.Context, repoName string, item 
 		logger = slog.Default()
 	}
 
-	workDir, err := repo.EnsureClone(ctx, logger, e.StateDir, repoName)
+	workDir, err := repo.EnsureWorkspace(ctx, logger, e.StateDir, repoName, e.AllRepos)
 	if err != nil {
-		return fmt.Errorf("executor: ensure clone of %s: %w", repoName, err)
+		return fmt.Errorf("executor: ensure workspace for %s: %w", repoName, err)
 	}
 
 	promptText, err := buildPromptForWorker(repoName, item, worker)

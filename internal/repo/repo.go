@@ -137,6 +137,39 @@ func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName st
 	return localPath, nil
 }
 
+// EnsureWorkspace は allRepos に指定されたすべてのリポジトリを stateDir 配下に
+// clone / 最新化し、同時に主リポジトリ (targetRepo) のローカルパスを返す。
+//
+// 手元 PC の開発環境（マルチワークスペース）と同様に、同一 owner 配下に各リポジトリが
+// 兄弟ディレクトリとして並ぶ構造（例: stateDir/owner/repo-a, stateDir/owner/repo-b）が
+// 自動的に維持される。
+func EnsureWorkspace(ctx context.Context, logger *slog.Logger, stateDir, targetRepo string, allRepos []string, opts ...Option) (string, error) {
+	if len(allRepos) == 0 {
+		allRepos = []string{targetRepo}
+	}
+
+	var targetPath string
+	for _, r := range allRepos {
+		p, err := EnsureClone(ctx, logger, stateDir, r, opts...)
+		if err != nil {
+			return "", fmt.Errorf("repo: ensure clone for workspace member %s: %w", r, err)
+		}
+		if r == targetRepo {
+			targetPath = p
+		}
+	}
+
+	if targetPath == "" {
+		p, err := EnsureClone(ctx, logger, stateDir, targetRepo, opts...)
+		if err != nil {
+			return "", fmt.Errorf("repo: ensure clone for target repo %s: %w", targetRepo, err)
+		}
+		targetPath = p
+	}
+
+	return targetPath, nil
+}
+
 // splitRepo は "owner/name" 形式の repoName を owner と name に分割する。
 func splitRepo(repoName string) (owner, name string, err error) {
 	parts := strings.SplitN(repoName, "/", 2)

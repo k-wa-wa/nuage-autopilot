@@ -62,7 +62,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
 	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
-	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Logger: logger}
+	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, AllRepos: cfg.AllRepos, Logger: logger}
 
 	result, err := cycle.Run(context.Background(), logger, client, dispatcher, executor, cfg.Repo, cfg.StateDir)
 	if err != nil {

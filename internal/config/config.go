@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"strings"
 )
 
 // DefaultStateDir は --state-dir / NUAGE_STATE_DIR のいずれも指定されなかった場合の既定値である。
@@ -19,6 +20,10 @@ type Config struct {
 
 	// StateDir はリポジトリの clone やサイクルの作業状態を置くディレクトリである。
 	StateDir string
+
+	// AllRepos は StateDir 配下に事前 clone / 最新化しておくべきリポジトリ一覧である（"owner/name" 形式）。
+	// --all-repos フラグ（カンマ区切り）で指定される。
+	AllRepos []string
 
 	// ShowVersion が true の場合、呼び出し側はバージョンを表示して即座に終了する。
 	ShowVersion bool
@@ -65,14 +70,21 @@ func MissingEnv() []string {
 func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("nuage-autopilot", flag.ContinueOnError)
 	repo := fs.String("repo", "", "処理対象のリポジトリ (owner/name 形式、例: k-wa-wa/pechka)")
+	allReposStr := fs.String("all-repos", "", "事前クリーン更新を行うリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-cluster)")
 	showVersion := fs.Bool("version", false, "バージョンを表示して終了する")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
 
+	allRepos := parseCommaList(*allReposStr)
+	if len(allRepos) == 0 && *repo != "" {
+		allRepos = []string{*repo}
+	}
+
 	cfg := Config{
 		Repo:        *repo,
+		AllRepos:    allRepos,
 		StateDir:    resolveStateDir(),
 		ShowVersion: *showVersion,
 	}
@@ -82,6 +94,20 @@ func Parse(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseCommaList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var res []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			res = append(res, p)
+		}
+	}
+	return res
 }
 
 // resolveStateDir は NUAGE_STATE_DIR 環境変数を優先し、未設定なら DefaultStateDir を返す。
