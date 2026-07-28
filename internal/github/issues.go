@@ -34,3 +34,17 @@ func (c *Client) ListOpenIssues(ctx context.Context, repo string) ([]Issue, erro
 	}
 	return issues, nil
 }
+
+// GetIssue は repo の number 番の Issue 単体を取得する。
+// 通知（GET /notifications）が返すのはスレッドのタイトルと URL のみで作成者や
+// 本文を含まないため、新規に認識した Issue の作成者判定（NUAGE_ALLOWED_AUTHORS）や
+// agent:ignore ラベルの確認、"opened" イベントの本文組み立てに使う。
+func (c *Client) GetIssue(ctx context.Context, repo string, number int) (Issue, error) {
+	path := fmt.Sprintf("/repos/%s/issues/%d", repo, number)
+
+	var raw rawIssue
+	if err := c.request(ctx, "GET", path, nil, &raw); err != nil {
+		return Issue{}, fmt.Errorf("get issue %s#%d: %w", repo, number, err)
+	}
+	return raw.toIssue(), nil
+}

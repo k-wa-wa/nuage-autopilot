@@ -161,6 +161,32 @@ func TestItemParentAndChildren(t *testing.T) {
 	}
 }
 
+func TestUpdateItemLastSeenAt_RoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	it, _, err := s.UpsertItem(ctx, "k-wa-wa/pechka", 1, KindIssue)
+	if err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+	if it.LastSeenAt != nil {
+		t.Fatalf("LastSeenAt = %v, want nil for a freshly created item", it.LastSeenAt)
+	}
+
+	seenAt := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	if err := s.UpdateItemLastSeenAt(ctx, it.ID, seenAt); err != nil {
+		t.Fatalf("UpdateItemLastSeenAt: %v", err)
+	}
+
+	reloaded, ok, err := s.GetItemByID(ctx, it.ID)
+	if err != nil || !ok {
+		t.Fatalf("GetItemByID: ok=%v err=%v", ok, err)
+	}
+	if reloaded.LastSeenAt == nil || !reloaded.LastSeenAt.Equal(seenAt) {
+		t.Fatalf("LastSeenAt = %v, want %v", reloaded.LastSeenAt, seenAt)
+	}
+}
+
 func TestListItemsByPhase(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

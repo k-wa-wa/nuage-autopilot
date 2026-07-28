@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestClient は handler を提供する httptest.Server に向いた Client を生成する。
@@ -15,7 +16,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return NewClient("test-token", WithBaseURL(server.URL))
+	return NewClient(WithBaseURL(server.URL), WithStaticToken("test-token"))
 }
 
 func TestListOpenIssues_FiltersOutPullRequests(t *testing.T) {
@@ -92,6 +93,26 @@ func TestGetPullRequest(t *testing.T) {
 	}
 	if pr.Number != 5 || pr.HeadSHA != "deadbeef" {
 		t.Fatalf("pr = %+v, want Number=5 HeadSHA=deadbeef", pr)
+	}
+}
+
+func TestGetIssue(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/k-wa-wa/pechka/issues/7" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"number": 7, "title": "add X", "state": "open", "body": "please add X", "user": {"login": "alice", "type": "User"}, "labels": [{"name": "agent:ignore"}]}`))
+	})
+
+	issue, err := client.GetIssue(context.Background(), "k-wa-wa/pechka", 7)
+	if err != nil {
+		t.Fatalf("GetIssue() error = %v", err)
+	}
+	if issue.Number != 7 || issue.Body != "please add X" || issue.User.Login != "alice" {
+		t.Fatalf("issue = %+v, want Number=7 Body=%q User.Login=alice", issue, "please add X")
+	}
+	if len(issue.Labels) != 1 || issue.Labels[0] != "agent:ignore" {
+		t.Fatalf("issue.Labels = %v, want [agent:ignore]", issue.Labels)
 	}
 }
 
@@ -254,6 +275,110 @@ func TestListComments_IncludesReviews(t *testing.T) {
 	}
 }
 
+func TestListCommentsSince_FiltersReviewsClientSideAndSetsKind(t *testing.T) {
+	var gotQuery string
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues/3/comments":
+			gotQuery = r.URL.RawQuery
+			_, _ = w.Write([]byte(`[{"id": 1, "body": "new comment", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-02T00:00:00Z"}]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			// レビュー一覧は since に関係なく全件返る想定。since より古いものは
+			// クライアント側でフィルタされ、結果に含まれてはならない。
+			_, _ = w.Write([]byte(`[
+				{"id": 10, "body": "old review", "user": {"login": "bob", "type": "User"}, "submitted_at": "2026-06-01T00:00:00Z"},
+				{"id": 11, "body": "new review", "user": {"login": "bob", "type": "User"}, "submitted_at": "2026-07-03T00:00:00Z"}
+			]`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	})
+
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	comments, err := client.ListCommentsSince(context.Background(), "k-wa-wa/pechka", 3, since, true)
+	if err != nil {
+		t.Fatalf("ListCommentsSince() error = %v", err)
+	}
+	if !strings.Contains(gotQuery, "since=2026-07-01T00:00:00Z") {
+		t.Fatalf("query = %q, want it to contain an RFC3339 since param", gotQuery)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("len(comments) = %d, want 2 (old review must be filtered out)", len(comments))
+	}
+	if comments[0].Kind != CommentKindComment || comments[0].Body != "new comment" {
+		t.Fatalf("comments[0] = %+v, want kind=comment body=%q", comments[0], "new comment")
+	}
+	if comments[1].Kind != CommentKindReview || comments[1].Body != "new review" {
+		t.Fatalf("comments[1] = %+v, want kind=review body=%q", comments[1], "new review")
+	}
+}
+
+func TestListCommentsSince_NotPR_SkipsReviews(t *testing.T) {
+	requests := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/repos/k-wa-wa/pechka/issues/3/comments" {
+			t.Fatalf("unexpected path (reviews should not be fetched for an issue): %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[]`))
+	})
+
+	if _, err := client.ListCommentsSince(context.Background(), "k-wa-wa/pechka", 3, time.Now(), false); err != nil {
+		t.Fatalf("ListCommentsSince() error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+func TestGetNotifications_ParsesThreadsAndCapturesLastModified(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/notifications" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("since"); got != "2026-07-01T00:00:00Z" {
+			t.Fatalf("since query = %q, want %q", got, "2026-07-01T00:00:00Z")
+		}
+		if got := r.Header.Get("If-Modified-Since"); got != "Wed, 01 Jul 2026 00:00:00 GMT" {
+			t.Fatalf("If-Modified-Since header = %q", got)
+		}
+		w.Header().Set("Last-Modified", "Wed, 01 Jul 2026 01:00:00 GMT")
+		_, _ = w.Write([]byte(`[{"id": "1", "unread": true, "reason": "subscribed", "updated_at": "2026-07-01T01:00:00Z", "subject": {"title": "Greetings", "url": "https://api.github.com/repos/k-wa-wa/pechka/issues/42", "type": "Issue"}, "repository": {"full_name": "k-wa-wa/pechka"}}]`))
+	})
+
+	threads, lastModified, _, notModified, err := client.GetNotifications(context.Background(),
+		"2026-07-01T00:00:00Z", "Wed, 01 Jul 2026 00:00:00 GMT", "")
+	if err != nil {
+		t.Fatalf("GetNotifications() error = %v", err)
+	}
+	if notModified {
+		t.Fatalf("notModified = true, want false")
+	}
+	if len(threads) != 1 || threads[0].Repository.FullName != "k-wa-wa/pechka" || threads[0].Subject.Type != "Issue" {
+		t.Fatalf("threads = %+v", threads)
+	}
+	if lastModified != "Wed, 01 Jul 2026 01:00:00 GMT" {
+		t.Fatalf("lastModified = %q", lastModified)
+	}
+}
+
+func TestGetNotifications_304DoesNotError(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotModified)
+	})
+
+	threads, _, _, notModified, err := client.GetNotifications(context.Background(), "", "some-value", "")
+	if err != nil {
+		t.Fatalf("GetNotifications() error = %v, want nil for 304", err)
+	}
+	if !notModified {
+		t.Fatalf("notModified = false, want true")
+	}
+	if threads != nil {
+		t.Fatalf("threads = %v, want nil", threads)
+	}
+}
+
 func TestCreateLabel(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/repos/k-wa-wa/pechka/labels" {
@@ -301,6 +426,38 @@ func TestCurrentUser(t *testing.T) {
 	}
 	if login != "nuage-autopilot" {
 		t.Fatalf("login = %q, want nuage-autopilot", login)
+	}
+}
+
+func TestNewClient_ReReadsGHTokenEnvOnEveryRequest(t *testing.T) {
+	var gotAuth []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		w.Write([]byte(`{"login": "x"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(WithBaseURL(server.URL))
+
+	t.Setenv("GH_TOKEN", "")
+	if _, err := client.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser() error = %v", err)
+	}
+
+	// secrets.env が起動後に配置されたことを模す。再起動（NewClient の再生成）は行わない。
+	t.Setenv("GH_TOKEN", "later-token")
+	if _, err := client.CurrentUser(context.Background()); err != nil {
+		t.Fatalf("CurrentUser() error = %v", err)
+	}
+
+	if len(gotAuth) != 2 {
+		t.Fatalf("got %d requests, want 2", len(gotAuth))
+	}
+	if gotAuth[0] != "" {
+		t.Fatalf("1st Authorization header = %q, want empty (GH_TOKEN was unset)", gotAuth[0])
+	}
+	if gotAuth[1] != "Bearer later-token" {
+		t.Fatalf("2nd Authorization header = %q, want %q", gotAuth[1], "Bearer later-token")
 	}
 }
 

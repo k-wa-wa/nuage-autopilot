@@ -136,11 +136,22 @@ type CheckRunsResponse struct {
 	CheckRuns  []CheckRun `json:"check_runs"`
 }
 
-// Comment は Issue/PR に対する会話コメントを表す。
-// PR のレビューコメント（行コメント）は含まない
-// （GET /issues/{number}/comments は会話コメントのみを返す）。
+// CommentKind は Comment がどの GitHub API 由来かを区別する。
+// 通知取り込み（internal/ingest）が events.type を "commented" / "reviewed" の
+// どちらにするかを判定するために使う。両者は現在の遷移表では同じ扱いだが
+// （DESIGN.md 8.1 節）、由来を区別できる情報は落とさずに保持しておく。
+type CommentKind string
+
+const (
+	CommentKindComment CommentKind = "comment"
+	CommentKindReview  CommentKind = "review"
+)
+
+// Comment は Issue/PR に対する会話コメント、または PR レビュー本体を表す
+// （PR のレビューコメント＝差分行コメントは含まない）。
 type Comment struct {
 	ID        int64
+	Kind      CommentKind
 	Body      string
 	User      Author
 	CreatedAt time.Time
@@ -156,6 +167,7 @@ type rawComment struct {
 func (r rawComment) toComment() Comment {
 	return Comment{
 		ID:        r.ID,
+		Kind:      CommentKindComment,
 		Body:      r.Body,
 		User:      r.User,
 		CreatedAt: r.CreatedAt,
@@ -173,8 +185,25 @@ type rawReview struct {
 func (r rawReview) toComment() Comment {
 	return Comment{
 		ID:        r.ID,
+		Kind:      CommentKindReview,
 		Body:      r.Body,
 		User:      r.User,
 		CreatedAt: r.SubmittedAt,
 	}
+}
+
+// NotificationThread は GET /notifications の 1 要素をデコードするための型である。
+type NotificationThread struct {
+	ID        string    `json:"id"`
+	Unread    bool      `json:"unread"`
+	Reason    string    `json:"reason"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Subject   struct {
+		Title string `json:"title"`
+		URL   string `json:"url"`
+		Type  string `json:"type"` // "Issue", "PullRequest", "Commit", "Discussion" 等
+	} `json:"subject"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
 }

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -29,7 +30,7 @@ const userAgent = "nuage-autopilot"
 // Client は GitHub REST API を叩く最小限のクライアントである。
 type Client struct {
 	baseURL    string
-	token      string
+	tokenFunc  func() string
 	httpClient *http.Client
 }
 
@@ -55,14 +56,27 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// NewClient は token（GH_TOKEN の値）を使って Client を生成する。
-// token が空文字列の場合、Authorization ヘッダを付与せずリクエストする
-// （未認証のレート制限が適用される。GH_TOKEN 未設定は設定ミスとして呼び出し側で検知すべきだが、
-// Client 自体はそれを強制しない）。
-func NewClient(token string, opts ...Option) *Client {
+// WithStaticToken は固定のトークンを使う。主にテスト用。
+// 本番では既定の挙動（呼び出しごとに GH_TOKEN 環境変数を読む）を使う。
+func WithStaticToken(token string) Option {
+	return func(c *Client) {
+		c.tokenFunc = func() string { return token }
+	}
+}
+
+// NewClient は Client を生成する。
+//
+// token は Client の生成時に固定しない。リクエストのたびに GH_TOKEN 環境変数を
+// 読み直す（既定の tokenFunc）。secrets.env が起動後に配置された場合でも、
+// nuage-autopilot は常駐プロセスであるため、再起動せずに次の呼び出しから
+// 認証が通るようにするためである（DESIGN.md 15章）。
+//
+// GH_TOKEN が空文字列の場合、Authorization ヘッダを付与せずリクエストする
+// （未認証のレート制限が適用される）。
+func NewClient(opts ...Option) *Client {
 	c := &Client{
 		baseURL:    DefaultBaseURL,
-		token:      token,
+		tokenFunc:  func() string { return os.Getenv("GH_TOKEN") },
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	for _, opt := range opts {
@@ -98,18 +112,45 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 // Link ヘッダに含まれる rel="last" の URL をそのまま次のリクエスト先として
 // 使えるようにするために公開している。
 func (c *Client) requestWithHeader(ctx context.Context, method, url string, body, out any) (http.Header, error) {
+	status, header, data, err := c.doRequest(ctx, method, url, body, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if status < 200 || status >= 300 {
+		return header, &APIError{Method: method, Path: url, StatusCode: status, Body: string(data)}
+	}
+
+	if out != nil && len(data) > 0 {
+		if err := json.Unmarshal(data, out); err != nil {
+			return header, fmt.Errorf("github: %s %s: decode response body: %w", method, url, err)
+		}
+	}
+
+	return header, nil
+}
+
+// doRequest は HTTP リクエストを 1 回発行し、ステータスコード・レスポンスヘッダ・
+// ボディをそのまま返す。requestWithHeader と異なり、非 2xx を自動的にはエラーに
+// しない（呼び出し側がステータスコードごとに異なる扱いをしたい場合に使う。
+// 例えば GetNotifications は 304 を「変化なし」という正常な結果として扱う必要が
+// あり、APIError に変換されては困る）。
+//
+// err は transport レベルの失敗（DNS 解決失敗、接続エラー、ボディ読み取り失敗等）
+// のみを表す。
+func (c *Client) doRequest(ctx context.Context, method, url string, body any, extraHeaders map[string]string) (status int, header http.Header, data []byte, err error) {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, fmt.Errorf("github: encode request body: %w", err)
+			return 0, nil, nil, fmt.Errorf("github: encode request body: %w", err)
 		}
 		reqBody = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("github: build request: %w", err)
+		return 0, nil, nil, fmt.Errorf("github: build request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -118,30 +159,25 @@ func (c *Client) requestWithHeader(ctx context.Context, method, url string, body
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	if token := c.tokenFunc(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range extraHeaders {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("github: %s %s: %w", method, url, err)
+		return 0, nil, nil, fmt.Errorf("github: %s %s: %w", method, url, err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err = io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("github: %s %s: read response body: %w", method, url, err)
+		return 0, resp.Header, nil, fmt.Errorf("github: %s %s: read response body: %w", method, url, err)
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.Header, &APIError{Method: method, Path: url, StatusCode: resp.StatusCode, Body: string(data)}
-	}
-
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return resp.Header, fmt.Errorf("github: %s %s: decode response body: %w", method, url, err)
-		}
-	}
-
-	return resp.Header, nil
+	return resp.StatusCode, resp.Header, data, nil
 }

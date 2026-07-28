@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -43,9 +45,29 @@ func TestRun_MissingRepo(t *testing.T) {
 // 常駐する（Phase 1 以降の設計。oneshot だった旧実装と異なり、1 サイクルで
 // 戻ってくることはない）。テストプロセス自身に SIGTERM を送ることで終了させる。
 func TestRun_StartsDaemonAndStopsOnSIGTERM(t *testing.T) {
+	// このテストは実際の GitHub API には一切到達しない。Poller/Resyncer
+	// （internal/ingest）は daemon 起動直後に即座に 1 回呼ばれるため
+	// （internal/daemon の「起動直後に 1 回、以後は間隔ごと」という設計)、
+	// NUAGE_GITHUB_API_BASE_URL で参照先をローカルの httptest.Server に差し替える。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login": "nuage-autopilot"}`))
+		case "/notifications":
+			w.WriteHeader(http.StatusNotModified)
+		case "/repos/k-wa-wa/pechka/issues", "/repos/k-wa-wa/pechka/pulls":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
 	stateDir := t.TempDir()
 	t.Setenv("NUAGE_STATE_DIR", stateDir)
-	t.Setenv("GH_TOKEN", "")
+	t.Setenv("NUAGE_GITHUB_API_BASE_URL", server.URL)
+	t.Setenv("GH_TOKEN", "test-token")
 	t.Setenv("GIT_AUTHOR_NAME", "")
 	t.Setenv("GIT_AUTHOR_EMAIL", "")
 

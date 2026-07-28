@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // linkHeaderRe は RFC 8288 の Link ヘッダの 1 要素（"<url>; rel=\"name\""）を
@@ -66,6 +67,56 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR
 		} else {
 			// レビュー取得の失敗は、レビュー結果が観測できなくなり dispatcher の判断ミスにつながるため
 			// 404 以外のエラーは無視せず呼び出し元へ報告する。
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
+				return nil, fmt.Errorf("list reviews for %s#%d: %w", repo, number, err)
+			}
+		}
+	}
+
+	sort.Slice(comments, func(i, j int) bool {
+		return comments[i].CreatedAt.Before(comments[j].CreatedAt)
+	})
+
+	return comments, nil
+}
+
+// ListCommentsSince は repo の number（Issue/PR 番号）について、since より新しい
+// 会話コメント（および isPR の場合は PR レビュー）を取得する。
+//
+// ListComments と異なり、全履歴ではなく差分のみを対象とする（internal/ingest が
+// 1 分間隔のポーリングごとに「前回確認した時刻以降の新着」だけを取り出すために使う。
+// DESIGN.md 7.2 節）。会話コメントは GitHub API の `since` クエリパラメータで
+// サーバー側フィルタするが、PR レビュー一覧の取得エンドポイントには `since` が
+// 無いため、全件取得してクライアント側で SubmittedAt > since を判定する。
+// レビューは通常件数が少ないため、この非対称な扱いによるコストは軽微である。
+//
+// 差分取得のみを想定しているため、ListComments と異なり Link ヘッダを辿った
+// 追加ページの取得は行わない（1 ページ 100 件を超える新着は通常起こらない）。
+func (c *Client) ListCommentsSince(ctx context.Context, repo string, number int, since time.Time, isPR bool) ([]Comment, error) {
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?since=%s&per_page=%d",
+		repo, number, since.UTC().Format(time.RFC3339), listPerPage)
+
+	var raw []rawComment
+	if err := c.request(ctx, "GET", path, nil, &raw); err != nil {
+		return nil, fmt.Errorf("list comments since %s for %s#%d: %w", since, repo, number, err)
+	}
+
+	comments := make([]Comment, 0, len(raw))
+	for _, r := range raw {
+		comments = append(comments, r.toComment())
+	}
+
+	if isPR {
+		reviewsPath := fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=%d", repo, number, listPerPage)
+		var rawReviews []rawReview
+		if err := c.request(ctx, "GET", reviewsPath, nil, &rawReviews); err == nil {
+			for _, r := range rawReviews {
+				if r.Body != "" && r.SubmittedAt.After(since) {
+					comments = append(comments, r.toComment())
+				}
+			}
+		} else {
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
 				return nil, fmt.Errorf("list reviews for %s#%d: %w", repo, number, err)

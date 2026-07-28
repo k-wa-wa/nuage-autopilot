@@ -5,11 +5,10 @@
 // internal/daemon 上で動かす（DESIGN.md 5章）。状態は SQLite（internal/store）に持ち、
 // プロセス自体は無状態である。
 //
-// Phase 1（本実装）の時点では internal/ingest・internal/engine がまだ無いため、
-// Poller/Worker には最小限のプレースホルダを渡し、「LLM も GitHub も呼ばず空回りする
-// デーモンとして systemd 上で安定稼働する」ことを確認する段階に留める
-// （DESIGN.md 18章 Phase 1）。Resyncer だけは、GitHub を必要としない
-// 期限切れリースの回収を実際に行う。
+// Phase 2（本実装）の時点で Poller/Resyncer は internal/ingest による実装に
+// 差し替わり、GitHub の変化を実際に events として取り込む（DESIGN.md 7章）。
+// internal/engine（遷移表・エージェント起動）はまだ無いため、Worker は
+// プレースホルダのままである（DESIGN.md 18章 Phase 3 で置き換える）。
 package main
 
 import (
@@ -25,6 +24,8 @@ import (
 
 	"autopilot/internal/config"
 	"autopilot/internal/daemon"
+	"autopilot/internal/github"
+	"autopilot/internal/ingest"
 	"autopilot/internal/store"
 )
 
@@ -84,11 +85,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 	logger.Info("nuage-autopilot starting",
 		"version", version, "repos", cfg.Repos, "state_dir", cfg.StateDir, "db_path", dbPath)
 
+	client := github.NewClient(githubClientOptions()...)
+
+	poller := &ingest.Poller{
+		Client:         client,
+		Store:          st,
+		Repos:          cfg.Repos,
+		AllowedAuthors: cfg.AllowedAuthors,
+		Logger:         logger,
+	}
+	resyncer := &ingest.Resyncer{
+		Client:         client,
+		Store:          st,
+		Repos:          cfg.Repos,
+		AllowedAuthors: cfg.AllowedAuthors,
+		Logger:         logger,
+	}
+
 	if err := daemon.Run(ctx, daemon.Config{
 		Logger:   logger,
-		Poller:   newPlaceholderPoller(logger),
+		Poller:   poller,
 		Worker:   newPlaceholderWorker(logger, st),
-		Resyncer: newLeaseReapingResyncer(logger, st),
+		Resyncer: resyncer,
 	}); err != nil {
 		logger.Error("daemon exited with error", "error", err.Error())
 		return 1
@@ -97,22 +115,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newPlaceholderPoller は Phase 1 のプレースホルダである。GitHub への通知取得
-// （DESIGN.md 7章）は internal/ingest として Phase 2 で実装する。
-func newPlaceholderPoller(logger *slog.Logger) daemon.Poller {
-	return daemon.PollerFunc(func(ctx context.Context) (int, error) {
-		logger.Debug("poll tick (Phase 1 placeholder: internal/ingest is not wired yet)")
-		return 0, nil
-	})
+// githubClientOptions は internal/github.Client の生成オプションを組み立てる。
+//
+// NUAGE_GITHUB_API_BASE_URL は本番運用では未設定のままでよい内部フックである。
+// 実際の GitHub API に到達させたくない結合テストや、GitHub Enterprise 運用での
+// ベース URL 差し替えのために用意している。
+func githubClientOptions() []github.Option {
+	var opts []github.Option
+	if baseURL := os.Getenv("NUAGE_GITHUB_API_BASE_URL"); baseURL != "" {
+		opts = append(opts, github.WithBaseURL(baseURL))
+	}
+	return opts
 }
 
-// newPlaceholderWorker は Phase 1 のプレースホルダである。実際のイベント処理
+// newPlaceholderWorker は Phase 2 時点でのプレースホルダである。実際のイベント処理
 // （DESIGN.md 8章）は internal/engine として Phase 3 で実装する。
 //
-// 現時点では events を enqueue する経路が無い（poller が常に 0 件を返す）ため
-// この関数の本体が実行されることは無いが、将来 enqueue 経路だけが先行してできた
-// 場合に備え、未処理イベントを検出したら「処理せず滞留させ、ログに残す」防御的な
-// 実装にしている。
+// internal/ingest が events を enqueue するようになった（Phase 2）ため、この
+// 関数はもう到達しうる。未処理イベントを見つけても処理せず滞留させ、ログに
+// 残すだけに留める（engine が実装されるまで、イベントは失われずキューに残る）。
 func newPlaceholderWorker(logger *slog.Logger, st *store.Store) daemon.Worker {
 	return daemon.WorkerFunc(func(ctx context.Context) (bool, error) {
 		ev, ok, err := st.NextUnprocessedEvent(ctx)
@@ -125,21 +146,5 @@ func newPlaceholderWorker(logger *slog.Logger, st *store.Store) daemon.Worker {
 		logger.Warn("found an unprocessed event but internal/engine is not wired yet (Phase 3); leaving it queued",
 			"event_id", ev.ID, "item_id", ev.ItemID, "type", ev.Type)
 		return false, nil
-	})
-}
-
-// newLeaseReapingResyncer は resync のうち GitHub を必要としない部分
-// （期限切れリースの回収。DESIGN.md 7.5 節）だけを Phase 1 から行う。
-// GitHub 側との全走査による突き合わせは internal/ingest として Phase 2 で追加する。
-func newLeaseReapingResyncer(logger *slog.Logger, st *store.Store) daemon.Resyncer {
-	return daemon.ResyncerFunc(func(ctx context.Context) error {
-		n, err := st.ReapExpiredLeases(ctx)
-		if err != nil {
-			return fmt.Errorf("reap expired leases: %w", err)
-		}
-		if n > 0 {
-			logger.Info("resync reaped expired leases", "count", n)
-		}
-		return nil
 	})
 }

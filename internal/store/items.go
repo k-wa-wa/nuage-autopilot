@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 const itemColumns = `id, repo, number, kind, phase, parent_id, session_id, head_sha, cost_usd, runs, last_seen_at, updated_at`
@@ -69,6 +70,18 @@ func (s *Store) ListItemsByPhase(ctx context.Context, phase Phase) ([]Item, erro
 	return scanItems(rows)
 }
 
+// ListItemsByRepo は repo に属する全アイテムを number 昇順で返す（phase を問わない）。
+// resync が GitHub 上で close/merge されたアイテムを検出するために、
+// 対象リポジトリの追跡中アイテム全体を必要とする（DESIGN.md 7.5 節）。
+func (s *Store) ListItemsByRepo(ctx context.Context, repo string) ([]Item, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+itemColumns+` FROM items WHERE repo = ? ORDER BY number ASC`, repo)
+	if err != nil {
+		return nil, fmt.Errorf("store: list items by repo %s: %w", repo, err)
+	}
+	defer rows.Close()
+	return scanItems(rows)
+}
+
 // ListChildren は parentID を親とするアイテムを返す。
 func (s *Store) ListChildren(ctx context.Context, parentID int64) ([]Item, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+itemColumns+` FROM items WHERE parent_id = ? ORDER BY id ASC`, parentID)
@@ -95,8 +108,10 @@ func (s *Store) UpdateItemHeadSHA(ctx context.Context, id int64, sha string) err
 }
 
 // UpdateItemLastSeenAt は取り込み済みコメントの最新時刻を更新する。
-func (s *Store) UpdateItemLastSeenAt(ctx context.Context, id int64, seenAt string) error {
-	return s.updateItem(ctx, id, "last_seen_at", seenAt)
+// GetItemByID 等が timeLayout で読み戻せるよう、他のタイムスタンプ列と同じ
+// 書式で保存する（生の文字列をそのまま書き込まない）。
+func (s *Store) UpdateItemLastSeenAt(ctx context.Context, id int64, seenAt time.Time) error {
+	return s.updateItem(ctx, id, "last_seen_at", formatTime(seenAt))
 }
 
 // SetItemParent は id の親を parentID に設定する。
