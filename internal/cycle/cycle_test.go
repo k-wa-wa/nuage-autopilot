@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 // call は mockServer が記録した 1 回のミューテーション系リクエスト（POST/DELETE）を表す。

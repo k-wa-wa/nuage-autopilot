@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 // このファイルのテストは実際の claude を一切起動しない。DefaultDispatcher.Command に

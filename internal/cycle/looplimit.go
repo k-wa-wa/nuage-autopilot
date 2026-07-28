@@ -3,7 +3,7 @@ package cycle
 import (
 	"sort"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 // LoopLimit は DESIGN.md 8章「ループ上限（Go 側の硬い制限）」に定める既定の上限値である。

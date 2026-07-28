@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 // 1 サイクルで実際に取った行動を表す文字列。ログの action キーおよび

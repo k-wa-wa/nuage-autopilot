@@ -17,9 +17,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/config"
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/cycle"
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/config"
+	"autopilot/internal/cycle"
+	"autopilot/internal/github"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で上書きされる想定の値である。

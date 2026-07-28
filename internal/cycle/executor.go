@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/prompt"
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/repo"
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/runner"
+	"autopilot/internal/prompt"
+	"autopilot/internal/repo"
+	"autopilot/internal/runner"
 )
 
 // LLMExecutor は、agent:running を付与された 1 件の Issue/PR に対して、dispatcher が

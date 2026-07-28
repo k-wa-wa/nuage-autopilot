@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/runner"
+	"autopilot/internal/github"
+	"autopilot/internal/runner"
 )
 
 // DispatcherModel は dispatcher の呼び出しに使うモデルである。判断のみで実装作業を

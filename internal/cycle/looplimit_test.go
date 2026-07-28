@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 func TestBotCommentsSinceLastHuman(t *testing.T) {

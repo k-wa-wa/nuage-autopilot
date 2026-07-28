@@ -1,3 +1,3 @@
-module github.com/k-wa-wa/nuage-workspace/autopilot
+module autopilot
 
 go 1.23

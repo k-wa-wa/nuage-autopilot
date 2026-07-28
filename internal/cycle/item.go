@@ -3,7 +3,7 @@ package cycle
 import (
 	"time"
 
-	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
+	"autopilot/internal/github"
 )
 
 // itemKind は Item が Issue か PR かを表す。ログの "kind" キーにそのまま出力する。
