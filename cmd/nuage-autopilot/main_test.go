@@ -52,6 +52,8 @@ func TestRun_RepoLogsCycleCompletion(t *testing.T) {
 	t.Setenv("NUAGE_STATE_DIR", "/tmp/nuage-autopilot-test")
 	t.Setenv("NUAGE_GITHUB_API_BASE_URL", server.URL)
 	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GIT_AUTHOR_NAME", "nuage-autopilot")
+	t.Setenv("GIT_AUTHOR_EMAIL", "nuage-autopilot@example.invalid")
 
 	var stdout, stderr bytes.Buffer
 

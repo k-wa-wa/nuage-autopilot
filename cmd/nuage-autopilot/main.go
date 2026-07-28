@@ -1,9 +1,10 @@
 // Command nuage-autopilot は GitHub Issue/PR を起点にアプリ開発を自動化する
 // nuage-autopilot の実行バイナリである。詳細は autopilot/DESIGN.md を参照。
 //
-// Phase 2 の時点では GitHub 連携（Issue/PR 取得・ラベル判定・LLM を要しない遷移）
-// までを行う。LLM CLI (claude/agy) の起動は Phase 3 で internal/cycle の
-// executeLLMPhase を差し替えることで実装する。
+// DESIGN.md 8章「ディスパッチャ方式」に従い、毎サイクル dispatcher (claude haiku,
+// internal/cycle.DefaultDispatcher) が現実の Issue/PR の状態を見てどの worker
+// (spec/dev/review/qa) に渡すかを判断し、選ばれたアイテムについてのみ対象リポジトリを
+// clone した上で worker (claude) を起動する（internal/cycle.DefaultLLMExecutor）。
 package main
 
 import (
@@ -60,8 +61,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
+	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
+	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Logger: logger}
 
-	result, err := cycle.Run(context.Background(), logger, client, cfg.Repo, cfg.StateDir)
+	result, err := cycle.Run(context.Background(), logger, client, dispatcher, executor, cfg.Repo, cfg.StateDir)
 	if err != nil {
 		logger.Error("cycle failed", "repo", cfg.Repo, "error", err.Error())
 		return 1

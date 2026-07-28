@@ -28,7 +28,7 @@ func TestListOpenIssues_FiltersOutPullRequests(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
-			{"number": 1, "title": "issue only", "state": "open", "labels": [{"name": "agent:spec"}], "user": {"login": "alice", "type": "User"}},
+			{"number": 1, "title": "issue only", "state": "open", "body": "please add X", "labels": [{"name": "agent:spec"}], "user": {"login": "alice", "type": "User"}},
 			{"number": 2, "title": "this is a pr", "state": "open", "labels": [], "user": {"login": "bot", "type": "User"}, "pull_request": {}}
 		]`))
 	})
@@ -46,6 +46,12 @@ func TestListOpenIssues_FiltersOutPullRequests(t *testing.T) {
 	if len(issues[0].Labels) != 1 || issues[0].Labels[0] != "agent:spec" {
 		t.Fatalf("issues[0].Labels = %v, want [agent:spec]", issues[0].Labels)
 	}
+	// GET /repos/{repo}/issues の一覧レスポンスは body を含んでおり、追加の API 呼び出し
+	// なしに取得できる（この一覧取得は 1 回のリクエストしか送っていないことを上の
+	// パスチェックとテストサーバーの単一ハンドラで保証している）。
+	if issues[0].Body != "please add X" {
+		t.Fatalf("issues[0].Body = %q, want %q", issues[0].Body, "please add X")
+	}
 }
 
 func TestListOpenPullRequests(t *testing.T) {
@@ -53,7 +59,7 @@ func TestListOpenPullRequests(t *testing.T) {
 		if r.URL.Path != "/repos/k-wa-wa/pechka/pulls" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`[{"number": 5, "title": "add feature", "state": "open", "labels": [{"name": "agent:review-general"}], "user": {"login": "nuage-autopilot", "type": "User"}, "draft": false}]`))
+		_, _ = w.Write([]byte(`[{"number": 5, "title": "add feature", "state": "open", "body": "implements the thing", "labels": [{"name": "agent:review-general"}], "user": {"login": "nuage-autopilot", "type": "User"}, "draft": false}]`))
 	})
 
 	prs, err := client.ListOpenPullRequests(context.Background(), "k-wa-wa/pechka")
@@ -65,6 +71,10 @@ func TestListOpenPullRequests(t *testing.T) {
 	}
 	if len(prs[0].Labels) != 1 || prs[0].Labels[0] != "agent:review-general" {
 		t.Fatalf("prs[0].Labels = %v, want [agent:review-general]", prs[0].Labels)
+	}
+	// GET /repos/{repo}/pulls も一覧レスポンスに body を含む（追加の API 呼び出しは不要）。
+	if prs[0].Body != "implements the thing" {
+		t.Fatalf("prs[0].Body = %q, want %q", prs[0].Body, "implements the thing")
 	}
 }
 

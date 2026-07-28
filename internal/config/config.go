@@ -35,13 +35,18 @@ var ErrRepoRequired = errors.New("--repo は必須である（例: --repo k-wa-w
 // その状態を異常終了として扱うとタイマー実行のたびに service が failed になるため、
 // 呼び出し側は未設定を検知したら警告ログを出して正常終了する（DESIGN.md 10.5 節）。
 //
-// claude / agy の認証情報は CLI の TUI でサインインして各ユーザーの HOME に
-// 保存されるため、環境変数としては要求しない。
+// claude の認証情報は CLI の TUI でサインインして各ユーザーの HOME に保存されるため、
+// 環境変数としては要求しない。
 //
-// git のコミット名義 (GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL) は実際に commit を行う
-// Phase 3 で必須に加える。
+// GH_TOKEN は GitHub API 操作および git の credential helper（internal/repo が
+// `gh auth setup-git` 経由で設定する）の認証に用いる。
+// GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL は claude が自律的に行う commit の名義に使う
+// （internal/runner が GIT_COMMITTER_* にも同値を設定する）。フェーズ3で実際に
+// claude が commit を行うようになったため必須に加えた。
 var RequiredEnvVars = []string{
 	"GH_TOKEN",
+	"GIT_AUTHOR_NAME",
+	"GIT_AUTHOR_EMAIL",
 }
 
 // MissingEnv は RequiredEnvVars のうち未設定または空文字列のものを返す。

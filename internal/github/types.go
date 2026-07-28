@@ -37,6 +37,7 @@ type rawIssue struct {
 	Number      int       `json:"number"`
 	Title       string    `json:"title"`
 	State       string    `json:"state"`
+	Body        string    `json:"body"`
 	Labels      []label   `json:"labels"`
 	User        Author    `json:"user"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -45,10 +46,15 @@ type rawIssue struct {
 }
 
 // Issue は nuage-autopilot が扱う Issue（PR を含まない）を表す。
+//
+// Body は GET /repos/{repo}/issues の一覧レスポンスに元々含まれている
+// フィールドであり、取得のために追加の API 呼び出しは発生しない
+// （dispatcher に本文を渡す DESIGN.md 8章の要求はこのフィールド経由で満たす）。
 type Issue struct {
 	Number    int
 	Title     string
 	State     string
+	Body      string
 	Labels    []string
 	User      Author
 	CreatedAt time.Time
@@ -64,6 +70,7 @@ func (r rawIssue) toIssue() Issue {
 		Number:    r.Number,
 		Title:     r.Title,
 		State:     r.State,
+		Body:      r.Body,
 		Labels:    labelNames(r.Labels),
 		User:      r.User,
 		CreatedAt: r.CreatedAt,
@@ -76,6 +83,7 @@ type rawPullRequest struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	State     string    `json:"state"`
+	Body      string    `json:"body"`
 	Labels    []label   `json:"labels"`
 	User      Author    `json:"user"`
 	Draft     bool      `json:"draft"`
@@ -84,10 +92,14 @@ type rawPullRequest struct {
 }
 
 // PullRequest は nuage-autopilot が扱う PR を表す。
+//
+// Body は GET /repos/{repo}/pulls の一覧レスポンスに元々含まれているフィールドであり、
+// Issue.Body と同様に追加の API 呼び出しは発生しない。
 type PullRequest struct {
 	Number    int
 	Title     string
 	State     string
+	Body      string
 	Labels    []string
 	User      Author
 	Draft     bool
@@ -100,6 +112,7 @@ func (r rawPullRequest) toPullRequest() PullRequest {
 		Number:    r.Number,
 		Title:     r.Title,
 		State:     r.State,
+		Body:      r.Body,
 		Labels:    labelNames(r.Labels),
 		User:      r.User,
 		Draft:     r.Draft,

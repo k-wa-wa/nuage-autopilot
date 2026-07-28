@@ -3,6 +3,7 @@ package cycle
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -102,216 +103,50 @@ func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-func TestRun_AssignsSpecToUnlabeledIssue(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 1, "title": "do something", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
+// fakeDispatcher は Dispatcher のテスト用フェイクである。実際の claude は一切起動せず、
+// 呼び出しを記録し、あらかじめ設定した decision/ok/err を返すのみである。
+type fakeDispatcher struct {
+	decision Decision
+	ok       bool
+	err      error
 
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionAssignSpec {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionAssignSpec)
-	}
-	if result.ItemNumber != 1 || result.Label != LabelSpec {
-		t.Fatalf("result = %+v, want ItemNumber=1 Label=%s", result, LabelSpec)
-	}
-
-	if got := m.mutatingCallCount(); got != 1 {
-		t.Fatalf("mutating call count = %d, want 1", got)
-	}
-	if m.calls[0].Method != http.MethodPost || m.calls[0].Path != "/repos/k-wa-wa/pechka/issues/1/labels" {
-		t.Fatalf("call = %+v, want POST .../issues/1/labels", m.calls[0])
-	}
+	calls []dispatchCall
 }
 
-func TestRun_DoesNotAssignSpecToUnlabeledPullRequest(t *testing.T) {
-	m := newMockServer(t)
-	m.prs = []map[string]any{
-		{"number": 2, "title": "a pr", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionNoop {
-		t.Fatalf("result.Action = %q, want %q (unlabeled PRs must not get agent:spec)", result.Action, ActionNoop)
-	}
-	if got := m.mutatingCallCount(); got != 0 {
-		t.Fatalf("mutating call count = %d, want 0", got)
-	}
+type dispatchCall struct {
+	Repo       string
+	Candidates []DispatchCandidate
 }
 
-func TestRun_ClearsWaitAfterHumanComment(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 3, "title": "ambiguous request", "state": "open", "labels": []any{map[string]string{"name": "agent:spec"}, map[string]string{"name": "agent:wait"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-	m.comments[3] = []map[string]any{
-		{"id": 1, "body": "what did you mean?", "user": map[string]string{"login": "nuage-autopilot", "type": "User"}, "created_at": rfc3339(time.Now().Add(-time.Hour))},
-		{"id": 2, "body": "I meant X", "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionClearWait {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionClearWait)
-	}
-	if result.Label != LabelWait {
-		t.Fatalf("result.Label = %q, want %q", result.Label, LabelWait)
-	}
-
-	if got := m.mutatingCallCount(); got != 1 {
-		t.Fatalf("mutating call count = %d, want 1", got)
-	}
-	want := "/repos/k-wa-wa/pechka/issues/3/labels/agent:wait"
-	if m.calls[0].Method != http.MethodDelete || m.calls[0].Path != want {
-		t.Fatalf("call = %+v, want DELETE %s", m.calls[0], want)
-	}
+func (f *fakeDispatcher) Dispatch(_ context.Context, repo string, candidates []DispatchCandidate) (Decision, bool, error) {
+	f.calls = append(f.calls, dispatchCall{Repo: repo, Candidates: candidates})
+	return f.decision, f.ok, f.err
 }
 
-func TestRun_KeepsWaitWhenLatestCommentIsFromBot(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 4, "title": "ambiguous request", "state": "open", "labels": []any{map[string]string{"name": "agent:spec"}, map[string]string{"name": "agent:wait"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-	m.comments[4] = []map[string]any{
-		{"id": 1, "body": "first question", "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now().Add(-time.Hour))},
-		{"id": 2, "body": "still unclear, could you clarify?", "user": map[string]string{"login": "nuage-autopilot", "type": "User"}, "created_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionNoop {
-		t.Fatalf("result.Action = %q, want %q (wait should not clear when bot posted last)", result.Action, ActionNoop)
-	}
-	if got := m.mutatingCallCount(); got != 0 {
-		t.Fatalf("mutating call count = %d, want 0", got)
-	}
+// fakeExecutor は LLMExecutor のテスト用フェイクである。実際の git/gh/claude は
+// 一切起動せず、呼び出しを記録し、あらかじめ設定した err を返すのみである。
+type fakeExecutor struct {
+	err   error
+	calls []fakeExecutorCall
 }
 
-func TestRun_KeepsWaitWhenNoComments(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 6, "title": "ambiguous request", "state": "open", "labels": []any{map[string]string{"name": "agent:spec"}, map[string]string{"name": "agent:wait"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.Action != ActionNoop {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionNoop)
-	}
-	if got := m.mutatingCallCount(); got != 0 {
-		t.Fatalf("mutating call count = %d, want 0", got)
-	}
+type fakeExecutorCall struct {
+	Repo   string
+	Number int
+	Kind   itemKind
+	Worker string
 }
 
-func TestRun_EscalatesTimedOutActivePhaseToTriage(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 5, "title": "stuck in dev", "state": "open", "labels": []any{map[string]string{"name": "agent:dev"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now().Add(-48 * time.Hour)), "updated_at": rfc3339(time.Now().Add(-48 * time.Hour))},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionEscalateTriage {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionEscalateTriage)
-	}
-	if result.Label != LabelDev {
-		t.Fatalf("result.Label = %q, want %q", result.Label, LabelDev)
-	}
-
-	if got := m.mutatingCallCount(); got != 2 {
-		t.Fatalf("mutating call count = %d, want 2 (remove old label + add agent:triage)", got)
-	}
-	removeWant := "/repos/k-wa-wa/pechka/issues/5/labels/agent:dev"
-	if m.calls[0].Method != http.MethodDelete || m.calls[0].Path != removeWant {
-		t.Fatalf("calls[0] = %+v, want DELETE %s", m.calls[0], removeWant)
-	}
-	if m.calls[1].Method != http.MethodPost || m.calls[1].Path != "/repos/k-wa-wa/pechka/issues/5/labels" {
-		t.Fatalf("calls[1] = %+v, want POST .../issues/5/labels", m.calls[1])
-	}
-}
-
-func TestRun_LogsLLMPhasePendingWithoutActing(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 7, "title": "needs review", "state": "open", "labels": []any{map[string]string{"name": "agent:review-general"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if result.Action != ActionLLMPhasePending {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionLLMPhasePending)
-	}
-	if result.Label != LabelReviewGeneral || result.ItemNumber != 7 {
-		t.Fatalf("result = %+v, want Label=%s ItemNumber=7", result, LabelReviewGeneral)
-	}
-	if got := m.mutatingCallCount(); got != 0 {
-		t.Fatalf("mutating call count = %d, want 0 (phase 2 must not act on LLM phases)", got)
-	}
-}
-
-func TestRun_SkipsTriageItems(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 8, "title": "escalated", "state": "open", "labels": []any{map[string]string{"name": "agent:triage"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.Action != ActionNoop {
-		t.Fatalf("result.Action = %q, want %q", result.Action, ActionNoop)
-	}
-	if got := m.mutatingCallCount(); got != 0 {
-		t.Fatalf("mutating call count = %d, want 0", got)
-	}
-}
-
-func TestRun_ProcessesOnlyOneItemPerCycle(t *testing.T) {
-	m := newMockServer(t)
-	m.issues = []map[string]any{
-		{"number": 10, "title": "first", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-		{"number": 11, "title": "second", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
-	}
-
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.Action != ActionAssignSpec || result.ItemNumber != 10 {
-		t.Fatalf("result = %+v, want ActionAssignSpec on issue #10 only", result)
-	}
-	if got := m.mutatingCallCount(); got != 1 {
-		t.Fatalf("mutating call count = %d, want 1 (only one item may be processed per cycle)", got)
-	}
+func (f *fakeExecutor) Execute(_ context.Context, repoName string, item Item, worker string) error {
+	f.calls = append(f.calls, fakeExecutorCall{Repo: repoName, Number: item.Number, Kind: item.Kind, Worker: worker})
+	return f.err
 }
 
 func TestRun_NoActionWhenRepoHasNothingOpen(t *testing.T) {
 	m := newMockServer(t)
+	dispatcher := &fakeDispatcher{}
 
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -321,21 +156,257 @@ func TestRun_NoActionWhenRepoHasNothingOpen(t *testing.T) {
 	if result.Repo != "k-wa-wa/pechka" || result.StateDir != "/var/lib/nuage-autopilot" {
 		t.Fatalf("result = %+v, want Repo/StateDir preserved", result)
 	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher.calls = %+v, want dispatcher not to be called when there is nothing open", dispatcher.calls)
+	}
+	if got := m.mutatingCallCount(); got != 0 {
+		t.Fatalf("mutating call count = %d, want 0", got)
+	}
 }
 
-func TestRun_ActivePhaseTimeoutIsConfigurable(t *testing.T) {
+func TestRun_ExcludesItemsWithAnyAgentLabel(t *testing.T) {
 	m := newMockServer(t)
 	m.issues = []map[string]any{
-		{"number": 9, "title": "recently active", "state": "open", "labels": []any{map[string]string{"name": "agent:qa"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now().Add(-2 * time.Minute)), "updated_at": rfc3339(time.Now().Add(-2 * time.Minute))},
+		{"number": 1, "title": "already claimed", "state": "open", "labels": []any{map[string]string{"name": "agent:running"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+		{"number": 2, "title": "awaiting human", "state": "open", "labels": []any{map[string]string{"name": "agent:awaiting_user_review"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
 	}
 
-	result, err := Run(context.Background(), testLogger(), m.client(), "k-wa-wa/pechka", "/var/lib/nuage-autopilot",
-		WithActivePhaseTimeout(time.Minute))
+	dispatcher := &fakeDispatcher{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Action != ActionNoop {
+		t.Fatalf("result.Action = %q, want %q (all items are opted out)", result.Action, ActionNoop)
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher.calls = %+v, want dispatcher not to be called when every item is opted out", dispatcher.calls)
+	}
+}
+
+func TestRun_PassesOnlyEligibleItemsAsCandidatesToDispatcher(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 1, "title": "already claimed", "state": "open", "labels": []any{map[string]string{"name": "agent:running"}}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+		{"number": 3, "title": "fresh issue", "state": "open", "body": "please implement X because Y", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: false}
+	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if result.Action != ActionEscalateTriage {
-		t.Fatalf("result.Action = %q, want %q (2m elapsed > 1m configured timeout)", result.Action, ActionEscalateTriage)
+	if len(dispatcher.calls) != 1 {
+		t.Fatalf("dispatcher.calls = %+v, want exactly 1 call", dispatcher.calls)
+	}
+	candidates := dispatcher.calls[0].Candidates
+	if len(candidates) != 1 || candidates[0].Number != 3 {
+		t.Fatalf("candidates = %+v, want only issue #3 (agent:running item excluded)", candidates)
+	}
+	if candidates[0].Author != "alice" || candidates[0].Title != "fresh issue" {
+		t.Fatalf("candidates[0] = %+v, want Author=alice Title=%q", candidates[0], "fresh issue")
+	}
+	// Issue 本文が GitHub API のレスポンスから Item を経由して DispatchCandidate まで
+	// 届いていることを確認する（本タスクの主眼）。
+	if candidates[0].Body != "please implement X because Y" {
+		t.Fatalf("candidates[0].Body = %q, want %q", candidates[0].Body, "please implement X because Y")
+	}
+}
+
+func TestRun_LoopLimitLabelsAwaitingUserReviewAndSkipsDispatch(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 4, "title": "stuck in a loop", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+	// LoopLimit (既定 5) 以上の Bot コメントが、最後の人間コメントより後に並んでいる。
+	comments := make([]map[string]any, 0, LoopLimit)
+	for i := 0; i < LoopLimit; i++ {
+		comments = append(comments, map[string]any{
+			"id": i, "body": "still working on it", "user": map[string]string{"login": "nuage-autopilot", "type": "User"},
+			"created_at": rfc3339(time.Now().Add(time.Duration(i) * time.Minute)),
+		})
+	}
+	m.comments[4] = comments
+
+	dispatcher := &fakeDispatcher{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Action != ActionAwaitingUserReview {
+		t.Fatalf("result.Action = %q, want %q", result.Action, ActionAwaitingUserReview)
+	}
+	if result.ItemNumber != 4 {
+		t.Fatalf("result.ItemNumber = %d, want 4", result.ItemNumber)
+	}
+	if len(dispatcher.calls) != 0 {
+		t.Fatalf("dispatcher.calls = %+v, want dispatcher not to be called this cycle", dispatcher.calls)
+	}
+
+	if got := m.mutatingCallCount(); got != 1 {
+		t.Fatalf("mutating call count = %d, want 1 (add agent:awaiting_user_review)", got)
+	}
+	want := "/repos/k-wa-wa/pechka/issues/4/labels"
+	if m.calls[0].Method != http.MethodPost || m.calls[0].Path != want {
+		t.Fatalf("call = %+v, want POST %s", m.calls[0], want)
+	}
+	if want := `{"labels":["agent:awaiting_user_review"]}`; m.calls[0].Body != want {
+		t.Fatalf("call body = %q, want %q", m.calls[0].Body, want)
+	}
+}
+
+func TestRun_HumanCommentResetsLoopCounterAndDispatcherIsCalled(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 9, "title": "recovered", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+	comments := []map[string]any{
+		{"id": 1, "body": "bot 1", "user": map[string]string{"login": "nuage-autopilot", "type": "User"}, "created_at": rfc3339(time.Now().Add(-time.Hour))},
+		// 人間の最新コメントがあるため、それより前の Bot コメントは数えない。
+		{"id": 2, "body": "looks fine, continue", "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now())},
+	}
+	m.comments[9] = comments
+
+	dispatcher := &fakeDispatcher{ok: false}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Action != ActionNoop {
+		t.Fatalf("result.Action = %q, want %q", result.Action, ActionNoop)
+	}
+	if len(dispatcher.calls) != 1 {
+		t.Fatalf("dispatcher.calls = %+v, want exactly 1 call (loop limit must not trigger)", dispatcher.calls)
+	}
+}
+
+func TestRun_DispatchesToWorkerAndTogglesRunningLabel(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 7, "title": "needs review", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 7, Kind: "issue", Worker: WorkerDev, Reason: "spec approved"}}
+	executor := &fakeExecutor{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Action != ActionWorkerExecuted {
+		t.Fatalf("result.Action = %q, want %q", result.Action, ActionWorkerExecuted)
+	}
+	if result.Worker != WorkerDev || result.ItemNumber != 7 {
+		t.Fatalf("result = %+v, want Worker=%s ItemNumber=7", result, WorkerDev)
+	}
+
+	if len(executor.calls) != 1 {
+		t.Fatalf("executor.calls = %+v, want exactly 1 call", executor.calls)
+	}
+	call := executor.calls[0]
+	if call.Repo != "k-wa-wa/pechka" || call.Number != 7 || call.Worker != WorkerDev {
+		t.Fatalf("executor call = %+v, want repo=k-wa-wa/pechka number=7 worker=%s", call, WorkerDev)
+	}
+
+	// agent:running が起動直前に付与され、終了後に外されたことを確認する。
+	if got := m.mutatingCallCount(); got != 2 {
+		t.Fatalf("mutating call count = %d, want 2 (add agent:running + remove agent:running)", got)
+	}
+	addWant := "/repos/k-wa-wa/pechka/issues/7/labels"
+	if m.calls[0].Method != http.MethodPost || m.calls[0].Path != addWant {
+		t.Fatalf("calls[0] = %+v, want POST %s (agent:running)", m.calls[0], addWant)
+	}
+	removeWant := "/repos/k-wa-wa/pechka/issues/7/labels/agent:running"
+	if m.calls[1].Method != http.MethodDelete || m.calls[1].Path != removeWant {
+		t.Fatalf("calls[1] = %+v, want DELETE %s", m.calls[1], removeWant)
+	}
+}
+
+func TestRun_DispatcherNoDecisionResultsInNoop(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 10, "title": "ambiguous", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: false}
+	executor := &fakeExecutor{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Action != ActionNoop {
+		t.Fatalf("result.Action = %q, want %q", result.Action, ActionNoop)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("executor.calls = %+v, want no worker execution", executor.calls)
+	}
+	if got := m.mutatingCallCount(); got != 0 {
+		t.Fatalf("mutating call count = %d, want 0 (no label changes when dispatcher has nothing to do)", got)
+	}
+}
+
+func TestRun_DispatcherErrorPropagates(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 11, "title": "x", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{err: errors.New("boom")}
+	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err == nil {
+		t.Fatalf("Run() error = nil, want an error when the dispatcher itself fails")
+	}
+}
+
+func TestRun_WorkerFailureIsNotFatalAndClearsRunningLabel(t *testing.T) {
+	// worker (claude) 自体の実行や、実行した結果としてのタスク失敗は nuage-autopilot 自体の
+	// 異常ではない。agent:running のみを外して次サイクルの再検討に委ねる。
+	// Run 自体は error を返さない。
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 12, "title": "hard bug", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 12, Kind: "issue", Worker: WorkerDev}}
+	executor := &fakeExecutor{err: errors.New("claude exited with non-zero status")}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil (worker failure must not fail the cycle)", err)
+	}
+
+	if result.Action != ActionWorkerFailed {
+		t.Fatalf("result.Action = %q, want %q", result.Action, ActionWorkerFailed)
+	}
+	if result.Worker != WorkerDev || result.ItemNumber != 12 {
+		t.Fatalf("result = %+v, want Worker=%s ItemNumber=12", result, WorkerDev)
+	}
+
+	if got := m.mutatingCallCount(); got != 2 {
+		t.Fatalf("mutating call count = %d, want 2 (add agent:running + remove agent:running)", got)
+	}
+}
+
+func TestRun_ProcessesOnlyOneItemPerCycleEvenWithMultipleCandidates(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 20, "title": "first", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+		{"number": 21, "title": "second", "state": "open", "labels": []any{}, "user": map[string]string{"login": "alice", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 20, Kind: "issue", Worker: WorkerSpec}}
+	executor := &fakeExecutor{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ItemNumber != 20 {
+		t.Fatalf("result.ItemNumber = %d, want 20", result.ItemNumber)
+	}
+	if len(dispatcher.calls) != 1 || len(dispatcher.calls[0].Candidates) != 2 {
+		t.Fatalf("dispatcher.calls = %+v, want exactly 1 call with 2 candidates", dispatcher.calls)
+	}
+	if len(executor.calls) != 1 {
+		t.Fatalf("executor.calls = %+v, want exactly 1 call (only the dispatcher's chosen item)", executor.calls)
 	}
 }

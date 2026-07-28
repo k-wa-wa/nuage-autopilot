@@ -47,10 +47,23 @@ func TestParse_StateDirFromEnv(t *testing.T) {
 
 func TestMissingEnv_ReportsUnsetRequiredVars(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GIT_AUTHOR_NAME", "nuage-autopilot")
+	t.Setenv("GIT_AUTHOR_EMAIL", "nuage-autopilot@example.invalid")
 
 	missing := MissingEnv()
 	if len(missing) != 1 || missing[0] != "GH_TOKEN" {
 		t.Fatalf("GH_TOKEN が未設定のときは報告されるべきである: got %v", missing)
+	}
+}
+
+func TestMissingEnv_ReportsAllUnsetRequiredVars(t *testing.T) {
+	for _, name := range RequiredEnvVars {
+		t.Setenv(name, "")
+	}
+
+	missing := MissingEnv()
+	if len(missing) != len(RequiredEnvVars) {
+		t.Fatalf("すべての必須環境変数が未設定のときは全件報告されるべきである: got %v", missing)
 	}
 }
 
