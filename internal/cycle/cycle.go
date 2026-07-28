@@ -1,11 +1,11 @@
 // Package cycle は 1 サイクル（対象リポジトリの Issue/PR を 1 周見て、処理すべきものが
 // あれば処理して終了する処理単位）の制御フローを持つ。
 //
-// DESIGN.md 8章「ディスパッチャ方式」に従い、ラベルはプログラムカウンタとして使わない。
-// 毎サイクル、open な Issue/PR の現実の状態（agent: ラベルが付いているか、ループ上限に
-// 達しているか）から、dispatcher (claude haiku) が「どのアイテムをどの worker に渡すか」
-// を判断し直す。1 サイクルで処理するのは高々 1 件のアイテムのみである
-// （DESIGN.md 8章「1 サイクルの流れ」）。
+// 「次にどの worker (work/verify) を起動すべきか」は、CI 状態・状態行・コミット SHA・
+// 関連 PR の有無から機械的に導出できるケースがほとんどである（transition.go の
+// 遷移表）。dispatcher (claude haiku) が呼ばれるのは、遷移表が「直近の人間コメントの
+// 意図を読む必要がある」と判定した候補が存在するときだけであり、それ以外のサイクルは
+// LLM を一切呼ばない。1 サイクルで処理するのは高々 1 件のアイテムのみである。
 package cycle
 
 import (
@@ -22,24 +22,25 @@ import (
 // Result.Action にそのまま使う。
 const (
 	// ActionNoop は今回のサイクルで worker を起動しなかったことを表す。
-	// 対象が 0 件だった場合と、dispatcher が worker=none と判断した場合、
-	// dispatcher がリトライしても有効な決定を出せなかった場合のいずれも含む
-	// （詳細はログを参照する）。
+	// 対象が 0 件だった場合、遷移表がすべて WorkerNone と判定した場合、
+	// dispatcher が worker=none と判断した場合、dispatcher がリトライしても
+	// 有効な決定を出せなかった場合のいずれも含む（詳細はログを参照する）。
 	ActionNoop = "noop"
 
 	// ActionAwaitingUserReview はループ上限に達したアイテムに
 	// agent:awaiting_user_review を付与し、このサイクルは worker を起動しなかった
-	// ことを表す（DESIGN.md 8章「ループ上限（Go 側の硬い制限）」）。
+	// ことを表す。
 	ActionAwaitingUserReview = "awaiting_user_review"
 
-	// ActionWorkerExecuted は dispatcher が選んだ worker (claude) を起動し、
-	// 正常終了（終了コード 0）したことを表す。
+	// ActionWorkerExecuted は選ばれた worker (claude) を起動し、正常終了（終了コード 0）
+	// かつ有効な報告（internal/report）を残したことを表す。
 	ActionWorkerExecuted = "worker_executed"
 
 	// ActionWorkerFailed は worker (claude) の実行を試みたが、claude 自体を
-	// 実行できなかった、または 0 以外の終了コードで終わったことを表す。
-	// この場合もラベル状態は変更しない（agent:running のみ外す）ため、
-	// 次サイクルで dispatcher が再度検討する対象になる。
+	// 実行できなかった、0 以外の終了コードで終わった、または有効な報告を
+	// 残さなかった（report ファイル未生成・不正な JSON・その worker にとって
+	// 妥当でない status 等）ことを表す。この場合もラベル状態は変更しない
+	// （agent:running のみ外す）ため、次サイクルで再度検討される。
 	ActionWorkerFailed = "worker_failed"
 )
 
@@ -64,23 +65,33 @@ type Result struct {
 	// ItemNumber は Action の対象の Issue/PR 番号。Action が ActionNoop の場合は 0。
 	ItemNumber int
 
-	// Worker は dispatcher が選んだ worker（WorkerSpec 等）。
+	// Worker は選ばれた worker（WorkerWork/WorkerVerify）。
 	// worker を起動していない場合は空文字列。
 	Worker string
 }
 
+// classifiedCandidate は遷移表評価後の 1 候補である。
+type classifiedCandidate struct {
+	Item   Item
+	Action string
+	Reason string
+}
+
 // Run は repo に対する 1 サイクルを実行する。
 //
-// 手順（DESIGN.md 8章「1 サイクルの流れ」に従う）:
+// 手順:
 //  1. open な Issue/PR を取得し、agent: ラベルが付いているものを除外する。
 //  2. 残りが 0 件なら LLM を呼ばずに終了する。
 //  3. ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付けて
-//     終了する（このサイクルは dispatcher を呼ばない）。
-//  4. dispatcher (claude haiku) を 1 回だけ呼び、どのアイテムをどの worker に渡すかを
-//     決めさせる。
-//  5. 選ばれたアイテムに agent:running を付ける。
-//  6. 対象リポジトリを clone/更新し、worker (claude) を起動する。
-//  7. 終了したら agent:running を外す。
+//     終了する（このサイクルは遷移表も dispatcher も評価しない）。
+//  4. 残った候補それぞれについて遷移表 (transition.go) を評価する。
+//  5. work/verify が機械的に決まった候補があれば、その中から 1 件選ぶ
+//     （PR を優先し、同種であれば updated_at が古いものを優先する）。
+//  6. 機械的に決まった候補が無く、"ask" と判定された候補があれば、それらのみを
+//     dispatcher (claude haiku) に渡して 1 件選ばせる。
+//  7. 選ばれたアイテムに agent:running を付ける。
+//  8. 対象リポジトリを clone/更新し、worker (claude) を起動する。
+//  9. 終了したら agent:running を外す。
 func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispatcher Dispatcher, executor LLMExecutor, repo, stateDir string, allowedAuthors []string) (Result, error) {
 	result := Result{
 		Repo:      repo,
@@ -170,7 +181,7 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 	candidates = validCandidates
 
 	// (3) ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付与し、
-	// 今サイクルの dispatch 候補から除外して他の候補の検討に進む。
+	// 今サイクルの検討対象から除外して他の候補の検討に進む。
 	var eligibleCandidates []Item
 	for _, it := range candidates {
 		if botCommentsSinceLastHuman(commentsByNumber[it.Number], botLogin) >= LoopLimit {
@@ -195,46 +206,84 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		return result, nil
 	}
 
-	// (4) dispatcher を 1 サイクル 1 コールだけ呼ぶ。
-	decision, ok, err := dispatcher.Dispatch(ctx, repo, buildDispatchCandidates(candidates, commentsByNumber, botLogin, relatedPRs))
-	if err != nil {
-		return result, fmt.Errorf("cycle: dispatch: %w", err)
-	}
-	if !ok {
-		logger.Info("dispatcher produced no actionable decision this cycle", "repo", repo)
-		return result, nil
+	// (4) 遷移表を評価し、機械的に決まる候補（decisive）と、人間コメントの意図を
+	// 読む必要がある候補（asking）に分ける。WorkerNone と判定された候補は今回は
+	// 何もしないため、どちらにも含めない。
+	var decisive []classifiedCandidate
+	var asking []classifiedCandidate
+	for _, it := range candidates {
+		na := nextAction(it, commentsByNumber[it.Number], botLogin, relatedPRs[it.Number])
+		switch na.Action {
+		case WorkerWork, WorkerVerify:
+			decisive = append(decisive, classifiedCandidate{Item: it, Action: na.Action, Reason: na.Reason})
+		case ActionAsk:
+			asking = append(asking, classifiedCandidate{Item: it, Action: na.Action, Reason: na.Reason})
+		default:
+			logger.Debug("transition table produced no action for candidate", "repo", repo, "number", it.Number, "kind", string(it.Kind), "reason", na.Reason)
+		}
 	}
 
 	var chosen *Item
-	for i := range candidates {
-		if string(candidates[i].Kind) == decision.Kind && candidates[i].Number == decision.Number {
-			chosen = &candidates[i]
-			break
+	var chosenWorker string
+
+	if len(decisive) > 0 {
+		// (5) 機械的に決まった候補から 1 件選ぶ。
+		best := selectDecisiveCandidate(decisive)
+		chosen = &best.Item
+		chosenWorker = best.Action
+		logger.Info("transition table decided the next action", "repo", repo, "issue_number", chosen.Number, "kind", string(chosen.Kind), "worker", chosenWorker, "reason", best.Reason)
+	} else if len(asking) > 0 {
+		// (6) 機械的に決められる候補が無い場合のみ dispatcher を呼ぶ。
+		askItems := make([]Item, 0, len(asking))
+		reasons := make(map[int]string, len(asking))
+		for _, c := range asking {
+			askItems = append(askItems, c.Item)
+			reasons[c.Item.Number] = c.Reason
 		}
-	}
-	if chosen == nil {
-		// Dispatcher.Dispatch は候補集合との整合性を検証済みのはずだが、実装不備に
-		// 備えて防御的にエラーとする。
-		return result, fmt.Errorf("cycle: dispatcher chose kind=%s number=%d which is not among this cycle's candidates",
-			decision.Kind, decision.Number)
+
+		decision, ok, err := dispatcher.Dispatch(ctx, repo, buildDispatchCandidates(askItems, reasons, commentsByNumber, botLogin, relatedPRs))
+		if err != nil {
+			return result, fmt.Errorf("cycle: dispatch: %w", err)
+		}
+		if !ok {
+			logger.Info("dispatcher produced no actionable decision this cycle", "repo", repo)
+			return result, nil
+		}
+
+		for i := range asking {
+			if string(asking[i].Item.Kind) == decision.Kind && asking[i].Item.Number == decision.Number {
+				chosen = &asking[i].Item
+				break
+			}
+		}
+		if chosen == nil {
+			// Dispatcher.Dispatch は候補集合との整合性を検証済みのはずだが、実装不備に
+			// 備えて防御的にエラーとする。
+			return result, fmt.Errorf("cycle: dispatcher chose kind=%s number=%d which is not among this cycle's ask candidates",
+				decision.Kind, decision.Number)
+		}
+		chosenWorker = decision.Worker
+		logger.Info("dispatcher decided the next action", "repo", repo, "issue_number", chosen.Number, "kind", string(chosen.Kind), "worker", chosenWorker, "reason", decision.Reason)
+	} else {
+		logger.Info("no eligible candidate remaining after transition table evaluation", "repo", repo)
+		return result, nil
 	}
 
 	result.ItemKind = string(chosen.Kind)
 	result.ItemNumber = chosen.Number
-	result.Worker = decision.Worker
+	result.Worker = chosenWorker
 
-	// (5) 選ばれたアイテムに agent:running を付ける。
+	// (7) 選ばれたアイテムに agent:running を付ける。
 	if err := client.AddLabel(ctx, repo, chosen.Number, LabelRunning); err != nil {
 		return result, fmt.Errorf("cycle: add %s to %s#%d: %w", LabelRunning, repo, chosen.Number, err)
 	}
 	logger.Info("dispatched item to worker",
-		"repo", repo, "issue_number", chosen.Number, "kind", string(chosen.Kind),
-		"worker", decision.Worker, "reason", decision.Reason)
+		"repo", repo, "issue_number", chosen.Number, "kind", string(chosen.Kind), "worker", chosenWorker)
 
-	// (6) 対象リポジトリを clone/更新し、worker (claude) を起動する。
-	execErr := executor.Execute(ctx, repo, *chosen, decision.Worker)
+	// (8) 対象リポジトリを clone/更新し、worker (claude) を起動する。
+	execErr := executor.Execute(ctx, repo, *chosen, chosenWorker)
 
-	// (7) agent:running は成功・失敗にかかわらず外す（DESIGN.md 8章）。
+	// (9) agent:running は成功・失敗にかかわらず外す。
 	// worker 実行中にシグナル等で ctx がキャンセルされた場合でも RemoveLabel が
 	// context canceled で失敗してラベルが残留しないよう、context.WithoutCancel を使用する。
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -249,15 +298,38 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		// アイテムには agent: ラベルが残らないため、次サイクルで dispatcher が
 		// 再度検討する対象になる。
 		logger.Error("worker execution failed",
-			"repo", repo, "issue_number", chosen.Number, "worker", decision.Worker, "error", execErr.Error())
+			"repo", repo, "issue_number", chosen.Number, "worker", chosenWorker, "error", execErr.Error())
 		result.Action = ActionWorkerFailed
 		return result, nil
 	}
 
 	logger.Info("worker execution completed",
-		"repo", repo, "issue_number", chosen.Number, "worker", decision.Worker)
+		"repo", repo, "issue_number", chosen.Number, "worker", chosenWorker)
 	result.Action = ActionWorkerExecuted
 	return result, nil
+}
+
+// selectDecisiveCandidate は機械的に決まった候補（cands）の中から今サイクルで
+// 処理する 1 件を選ぶ。PR を Issue より優先し（PR は「仕掛品」であり先に流し切る
+// ことで WIP を溜めないため）、同種であれば updated_at が古いものを優先する
+// （長く放置されているアイテムを先に処理する）。
+func selectDecisiveCandidate(cands []classifiedCandidate) classifiedCandidate {
+	best := cands[0]
+	for _, c := range cands[1:] {
+		if isBetterDecisiveCandidate(c, best) {
+			best = c
+		}
+	}
+	return best
+}
+
+func isBetterDecisiveCandidate(a, b classifiedCandidate) bool {
+	aPR := a.Item.Kind == kindPullRequest
+	bPR := b.Item.Kind == kindPullRequest
+	if aPR != bPR {
+		return aPR
+	}
+	return a.Item.UpdatedAt.Before(b.Item.UpdatedAt)
 }
 
 func isAllowedAuthor(author string, allowed []string) bool {

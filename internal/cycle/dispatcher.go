@@ -12,62 +12,54 @@ import (
 	"time"
 
 	"autopilot/internal/github"
+	"autopilot/internal/report"
 	"autopilot/internal/runner"
 )
 
 // DispatcherModel は dispatcher の呼び出しに使うモデルである。判断のみで実装作業を
-// 伴わないため、常に haiku を明示指定する（DESIGN.md 8章「dispatcher の契約」）。
+// 伴わないため、常に haiku を明示指定する。
 const DispatcherModel = "claude-haiku-4-5-20251001"
 
 // dispatchMaxAttempts は dispatcher 呼び出しの最大試行回数である。
-// DESIGN.md 8章「パース失敗または不正値の場合は 1 回だけ再試行し、それでも駄目なら
-// 何もせず終了する」に対応する（初回 + 再試行 1 回 = 2）。
+// パース失敗または不正値の場合は 1 回だけ再試行し、それでも駄目なら何もせず終了する
+// （初回 + 再試行 1 回 = 2）。
 const dispatchMaxAttempts = 2
 
-// Worker* は dispatcher が選択できる worker の識別子である（DESIGN.md 8章「worker」）。
+// Worker* は dispatcher が選択できる worker の識別子である。
+// work/verify は internal/report が定義する状態行の worker= 値と共通であり、
+// dispatcher の決定と worker の実行結果を同じ語彙で扱えるようにするため report
+// パッケージの定数をそのまま再エクスポートする。none は「今回は何もしない」を表す
+// dispatcher 固有の値であり、状態行には現れない。
 const (
-	WorkerSpec   = "spec"
-	WorkerDev    = "dev"
-	WorkerReview = "review"
-	WorkerQA     = "qa"
+	WorkerWork   = report.WorkerWork
+	WorkerVerify = report.WorkerVerify
 	WorkerNone   = "none"
 )
 
 var validWorkers = map[string]bool{
-	WorkerSpec:   true,
-	WorkerDev:    true,
-	WorkerReview: true,
-	WorkerQA:     true,
+	WorkerWork:   true,
+	WorkerVerify: true,
 	WorkerNone:   true,
 }
 
 // bodyPreviewLimit は DispatchCandidate.Body に含める Issue/PR 本文の最大文字数である。
-// DESIGN.md 8章「dispatcher へは Issue/PR の本文と直近のコメント履歴を渡す」に対応する。
-// 「仕様が固まっているか」を判断するには本文の要点（背景・要件・受け入れ基準）が
-// 読める程度の分量が要る。2000 文字あれば typical な Issue 本文はほぼ全文入り、
-// 極端に長い設計ドキュメント級の本文でも冒頭の要旨は収まるという想定で決めた値である。
-// clone しない dispatcher にとってこれが唯一の一次情報源になるため、コメントの
-// プレビューより大きく取っている。
+// dispatcher は「どのアイテムを処理するか」の判断材料としてのみ本文を必要とし、
+// 実際の実装・検証は worker が別途本文全文を読んで行うため、要点が読める程度の
+// 分量で足りる。
 const bodyPreviewLimit = 2000
 
 // commentPreviewLimit は DispatchCommentSummary.Preview に含める本文の最大文字数である。
-// dispatcher は clone せずメタデータのみで判断するが、直近コメントの本文が短すぎると
-// 「レビュー合格/不合格」「仕様の承認/差し戻し」といった状態を判別しきれない
-// （旧 200 文字では bot のレビュー結果コメントの結論部分が切れて読めないことがあった）。
-// 600 文字であれば、レビュー結果や質問への回答といったコメントの要点まで大抵は収まる。
 const commentPreviewLimit = 600
 
 // recentCommentLimit は DispatchCandidate に含める直近コメントの件数である。
-// 5 件では「spec への質問 → 回答 → 再質問」のような往復が数往復続いただけで
-// 一番古い文脈（最初の指摘や承認）が切り捨てられてしまうことがあったため、8 件に増やした。
-// LoopLimit（既定 5）より大きくすることで、ループ上限判定の対象になり得る
-// bot コメントの並びも dispatcher からある程度見える範囲に収める狙いもある。
 const recentCommentLimit = 8
 
 // DispatchCandidate は dispatcher に渡す 1 アイテム分のメタデータである。
-// DESIGN.md 8章「dispatcher へは Issue/PR の本文と直近のコメント履歴を渡す」に従い、
-// 本文（Body）を含める。ただし clone はしないため、本文・コメントとも文字数で
-// 切り詰めたうえで渡す（bodyPreviewLimit / commentPreviewLimit）。
+//
+// cycle.Run が遷移表（transition.go）で "ask" と判定した候補のみがここに渡る。
+// つまり CIStatus/Draft/RelatedPRs といった機械的な状態は既に遷移表で評価済みであり、
+// dispatcher にとっては「なぜ人間の判断を仰ぐ必要があるか」を理解するための
+// 参考情報にすぎない（決定ルールとしては使わない）。
 type DispatchCandidate struct {
 	Kind      itemKind
 	Number    int
@@ -77,17 +69,20 @@ type DispatchCandidate struct {
 	Labels    []string
 
 	// CIStatus は PR コミットに対する CI チェックランの状態 ("success", "failure", "pending", "none") である。
+	// 参考情報。
 	CIStatus string
 
-	// Draft は PR が Draft 状態かどうかを表す。
+	// Draft は PR が Draft 状態かどうかを表す。参考情報。
 	Draft bool
 
-	// RelatedPRs はこの Issue に対するオープンな PR 番号の一覧である（Issue のみ）。
+	// RelatedPRs はこの Issue に対するオープンな PR 番号の一覧である（Issue のみ）。参考情報。
 	RelatedPRs []int
 
-	// Body は Issue/PR 本文を bodyPreviewLimit で切り詰めたものである。切り詰めが
-	// 発生した場合は truncateRunes が末尾に "…" を付与するため、dispatcher 側でも
-	// 「本文の続きが省略されている」と認識できる。
+	// PendingReason は遷移表がこの候補を "ask" と判定した理由である
+	// （例: "human commented after the last status line"）。
+	PendingReason string
+
+	// Body は Issue/PR 本文を bodyPreviewLimit で切り詰めたものである。
 	Body           string
 	RecentComments []DispatchCommentSummary
 }
@@ -100,7 +95,7 @@ type DispatchCommentSummary struct {
 	Preview   string
 }
 
-// Decision は dispatcher の出力である（DESIGN.md 8章の JSON 契約に対応する）。
+// Decision は dispatcher の出力である。
 type Decision struct {
 	Number int    `json:"number"`
 	Kind   string `json:"kind"`
@@ -108,10 +103,10 @@ type Decision struct {
 	Reason string `json:"reason"`
 }
 
-// Dispatcher は 1 サイクルにつき 1 回、候補アイテムの中からどれをどの worker に
-// 渡すかを決める処理の抽象である。cycle.Run はこのインターフェース越しにのみ
-// dispatcher を呼ぶため、cycle パッケージのテストでは実際の claude を起動しない
-// フェイク実装に差し替えられる。
+// Dispatcher は、遷移表だけでは機械的に決められなかった候補（"ask" と判定された
+// 候補）の中から、直近の人間コメントの意図を汲んで次のアクションを決める処理の
+// 抽象である。cycle.Run はこのインターフェース越しにのみ dispatcher を呼ぶため、
+// cycle パッケージのテストでは実際の claude を起動しないフェイク実装に差し替えられる。
 //
 // 戻り値の bool は「実行可能な決定が得られたかどうか」を表す。false の場合
 // （dispatcher が worker=none と判断した場合、またはパース失敗・不正値が
@@ -170,7 +165,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, repo string, candidate
 			"repo", repo, "attempt", attempt, "max_attempts", dispatchMaxAttempts, "error", lastErr.Error())
 	}
 
-	// DESIGN.md 8章: パース失敗・不正値が再試行しても解消しない場合、何もせず終了する。
+	// パース失敗・不正値が再試行しても解消しない場合、何もせず終了する。
 	// アイテムにラベルを付けないため、次サイクルで再度試行される。
 	logger.Warn("dispatcher failed after retry; skipping this cycle", "repo", repo, "error", lastErr.Error())
 	return Decision{}, false, nil
@@ -197,9 +192,8 @@ func (d *DefaultDispatcher) callOnce(ctx context.Context, prompt string, logger 
 
 	// claude --output-format json のラッパ。"result" は応答本文の文字列であり、
 	// --json-schema を指定した場合は加えて "structured_output" にスキーマに沿った
-	// JSON がそのまま入る（`claude --help` で確認し、実際に手元で検証済み）。
-	// このラッパ自体と、dispatcher のプロンプトに出力させる JSON 本体（Decision）を
-	// 混同しないよう、必ず structured_output 経由でデコードする。
+	// JSON がそのまま入る。このラッパ自体と、dispatcher のプロンプトに出力させる
+	// JSON 本体（Decision）を混同しないよう、必ず structured_output 経由でデコードする。
 	var wrapper struct {
 		IsError           bool            `json:"is_error"`
 		Result            string          `json:"result"`
@@ -225,16 +219,13 @@ func (d *DefaultDispatcher) callOnce(ctx context.Context, prompt string, logger 
 }
 
 // dispatchJSONSchema は --json-schema に渡す JSON Schema である。
-// number/kind は worker="none" のときは無視されるため必須にしていない
-// （必須にすると worker="none" のときも意味のない値を強制することになるため）。
-// worker と reason は常に意味を持つため必須とする。
-const dispatchJSONSchema = `{"type":"object","properties":{"number":{"type":"integer"},"kind":{"type":"string","enum":["issue","pull_request"]},"worker":{"type":"string","enum":["spec","dev","review","qa","none"]},"reason":{"type":"string"}},"required":["worker","reason"],"additionalProperties":false}`
+// number/kind は worker="none" のときは無視されるため必須にしていない。
+const dispatchJSONSchema = `{"type":"object","properties":{"number":{"type":"integer"},"kind":{"type":"string","enum":["issue","pull_request"]},"worker":{"type":"string","enum":["work","verify","none"]},"reason":{"type":"string"}},"required":["worker","reason"],"additionalProperties":false}`
 
-// validateDecision は Decision が DESIGN.md 8章の契約を満たしているかを検証する。
-//   - worker は spec/dev/review/qa/none のいずれかであること
-//   - worker が none の場合、number/kind は検証しない（判断の対象が無いという結果自体が
-//     有効な決定であるため）
-//   - worker が none 以外の場合、number と kind が手順1で取得した候補集合に含まれ、
+// validateDecision は Decision が dispatcher の契約を満たしているかを検証する。
+//   - worker は work/verify/none のいずれかであること
+//   - worker が none の場合、number/kind は検証しない
+//   - worker が none 以外の場合、number と kind が候補集合に含まれ、
 //     かつ worker がその kind に対して選択可能であること
 func validateDecision(d Decision, candidates []DispatchCandidate) error {
 	if !validWorkers[d.Worker] {
@@ -256,16 +247,13 @@ func validateDecision(d Decision, candidates []DispatchCandidate) error {
 }
 
 // workerSupportsKind は worker が kind のアイテムに対して選択可能かどうかを返す。
-// DESIGN.md 8章の worker 一覧（spec は仕様定義=Issue、review/qa は PR 向けの検証）に
-// 基づく制約であり、DESIGN.md に明文化されているわけではないが、number/kind の
-// 整合性チェックの自然な延長として追加した（詳細は実装報告を参照）。
+// work は Issue にも PR にも選べるが、verify はコードを検証するフェーズであり
+// PR にしか意味を持たない。
 func workerSupportsKind(worker string, kind itemKind) bool {
 	switch worker {
-	case WorkerSpec:
-		return kind == kindIssue
-	case WorkerDev:
+	case WorkerWork:
 		return kind == kindIssue || kind == kindPullRequest
-	case WorkerReview, WorkerQA:
+	case WorkerVerify:
 		return kind == kindPullRequest
 	default:
 		return false
@@ -308,9 +296,11 @@ func buildIssuePRLinks(items []Item) map[int][]int {
 	return issueToPRs
 }
 
-// buildDispatchCandidates は cycle.Run が選定した候補アイテムと、事前計算された Issue-PR 紐付けマップ、
-// およびコメント一覧から dispatcher に渡す DispatchCandidate のスライスを組み立てる。
-func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Comment, botLogin string, relatedPRs map[int][]int) []DispatchCandidate {
+// buildDispatchCandidates は cycle.Run が "ask" と判定した候補アイテムと、事前計算
+// された Issue-PR 紐付けマップ、コメント一覧、判定理由から dispatcher に渡す
+// DispatchCandidate のスライスを組み立てる。reasons が nil または該当エントリが
+// 無い場合、PendingReason は空文字列のままとする。
+func buildDispatchCandidates(items []Item, reasons map[int]string, commentsByNumber map[int][]github.Comment, botLogin string, relatedPRs map[int][]int) []DispatchCandidate {
 	issueToPRs := relatedPRs
 
 	out := make([]DispatchCandidate, 0, len(items))
@@ -345,6 +335,7 @@ func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Com
 			CIStatus:       it.CIStatus,
 			Draft:          it.Draft,
 			RelatedPRs:     issueToPRs[it.Number],
+			PendingReason:  reasons[it.Number],
 			Body:           truncateRunes(it.Body, bodyPreviewLimit),
 			RecentComments: summaries,
 		})
@@ -366,19 +357,22 @@ func truncateRunes(s string, n int) string {
 }
 
 // buildDispatchPrompt は候補一覧から dispatcher 向けの日本語プロンプトを組み立てる。
+//
+// cycle.Run はここに渡す候補を「遷移表だけでは機械的に決められなかったもの」に
+// 絞り込み済みである。CI 状態や related_open_prs による自動ルーティングは
+// 遷移表（transition.go）側の責務であり、dispatcher に判断させるのは
+// 「直近の人間コメントの意図が work・verify・none のどれに当たるか」の 1 点のみである。
 func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "あなたは対象リポジトリ「%s」の dispatcher である。\n", repo)
-	b.WriteString("以下の候補一覧の中から、次にどのアイテムをどの worker に渡すべきかを判断する。\n")
-	b.WriteString("あなた自身は実装や検証を行わない。判断のみを行い、指定された JSON 形式で出力する。\n\n")
+	b.WriteString("以下の候補はいずれも、直近の人間コメントの意図が機械的なルールだけでは判断できないため、あなたの判断を必要としている。\n")
+	b.WriteString("各候補について、本文および直近コメントを読み、次に何をすべきかを判断する。あなた自身は実装や検証を行わない。判断のみを行い、指定された JSON 形式で出力する。\n\n")
 
-	b.WriteString("## worker の役割\n")
-	b.WriteString("- spec: 要求を PRD と受け入れ基準に落とす。Issue にのみ選べる。\n")
-	b.WriteString("- dev: ブランチを切り実装し、テスト通過まで自己修復して PR を作成する。Issue/PR どちらにも選べる。\n")
-	b.WriteString("- review: バグ・セキュリティ・性能に加え、設計規約・影響範囲を検証する。PR にのみ選べる。\n")
-	b.WriteString("- qa: preview 環境に対する E2E を含む最終検証を行う。PR にのみ選べる。\n")
-	b.WriteString("- none: 今回着手すべき候補が無いと判断した場合に選ぶ。\n\n")
+	b.WriteString("## 選択肢\n")
+	b.WriteString("- work: 実装の追加・修正が必要だと判断した場合。Issue/PR どちらにも選べる。\n")
+	b.WriteString("- verify: コードは変更せず再検証すればよいと判断した場合。PR にのみ選べる。\n")
+	b.WriteString("- none: 対応不要（承認・雑談・様子見のコメント等）と判断した場合。\n\n")
 
 	b.WriteString("## 候補一覧\n")
 	if len(candidates) == 0 {
@@ -398,6 +392,9 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 		}
 		fmt.Fprintf(&b, "- kind=%s number=%d title=%q author=%s updated_at=%s labels=%v%s\n",
 			c.Kind, c.Number, c.Title, c.Author, c.UpdatedAt.UTC().Format(time.RFC3339), c.Labels, extraInfo)
+		if c.PendingReason != "" {
+			fmt.Fprintf(&b, "  保留理由: %s\n", c.PendingReason)
+		}
 		if c.Body == "" {
 			b.WriteString("  本文: (無し)\n")
 		} else {
@@ -418,26 +415,20 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 		}
 	}
 
-	b.WriteString("\n## 本文・コメントの読み方\n")
-	b.WriteString("- 本文は Issue/PR 作成時点の内容であり、「要求・仕様がどこまで固まっているか」（背景・要件・受け入れ基準が書かれているか、曖昧なままか）を判断する主な材料である。\n")
-	b.WriteString("- コメントは新しい順に並んでいる。コメントの 1 行目が \"<!-- nuage-autopilot worker=… status=… -->\" 形式の状態行である場合、それが最も信頼できる情報である。散文の解釈より状態行を優先すること。\n")
-	b.WriteString("- 状態行の読み替え: status=passed の review の次は qa、status=failed の review/qa の次は dev、status=done の spec/dev の次はそれぞれ dev/review が基本である。\n")
-	b.WriteString("- 本文・コメント本文の末尾が \"…\" で終わっている場合、文字数制限により切り詰められているため、末尾が \"…\" のときは文面から読み取れる範囲で判断すること。\n\n")
+	b.WriteString("\n## 読み方\n")
+	b.WriteString("- 本文は Issue/PR 作成時点の内容である。\n")
+	b.WriteString("- コメントは新しい順に並んでいる。1 行目が \"<!-- nuage-autopilot worker=… status=… -->\" 形式の状態行であるコメントは nuage-autopilot 自身の投稿であり、それより新しい人間のコメントが判断対象である。\n")
+	b.WriteString("- 本文・コメント本文の末尾が \"…\" の場合、文字数制限により切り詰められている。\n\n")
 
 	b.WriteString("## 判断の指針\n")
-	b.WriteString("- 候補一覧には、agent: 接頭辞のラベルが付いていない open な Issue/PR のみが含まれている。\n")
-	b.WriteString("- related_open_prs が存在する Issue には、原則として重ねて dev を割り当ててはならない。既存の PR 側の進捗（review や qa）を優先すること。\n")
-	b.WriteString("- PR の CI 状態 (ci_status): failure の場合は開発 (dev) に差し戻すこと。pending の場合はその PR を今回の選択対象から外し、他の候補から選ぶこと（他に選ぶべき候補が無い場合に限り none とする）。qa を割り当ててよいのは ci_status が success または none の場合のみである。\n")
-	b.WriteString("- 直近のコメントが人間からのものであれば、その内容を踏まえて次の worker を判断する。\n")
-	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、上記の状態行およびコメント内容から次に必要な worker を決定する。\n")
-	b.WriteString("- コメントが無い、または着手されていない新規の Issue には spec を、まだレビューを受けていない新規の PR には review を割り当てるのが基本である。\n")
-	b.WriteString("- 判断がつかない場合や、着手すべき候補が無い場合は、無理に選ばず worker を \"none\" とすること。\n\n")
+	b.WriteString("- 直近の人間コメントの内容から、修正の指示（work）・再検証の依頼（verify）・対応不要（none）のいずれかを判断すること。\n")
+	b.WriteString("- 判断がつかない場合は、無理に選ばず worker を \"none\" とすること。\n\n")
 
 	b.WriteString("## 出力形式\n")
 	b.WriteString("指定された JSON スキーマに従って構造化出力を返すこと。散文や補足を出力に含めないこと。\n")
 	b.WriteString("- worker が \"none\" 以外の場合: number と kind は候補一覧に実在する組み合わせでなければならない。\n")
 	b.WriteString("- worker が \"none\" の場合: number と kind は省略してよい。\n")
-	b.WriteString("- reason には、どのコメント・状態行を根拠にその worker を選んだのかを簡潔に書くこと。\n")
+	b.WriteString("- reason には、どのコメントを根拠にその判断をしたのかを簡潔に書くこと。\n")
 
 	return b.String()
 }

@@ -1,9 +1,9 @@
 package prompt
 
 import (
-	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mustContainAll は got が wants の全ての部分文字列を含むことを検証する。
@@ -17,29 +17,38 @@ func mustContainAll(t *testing.T, got string, wants ...string) {
 }
 
 // mustNotContainAny は got が wants のいずれの部分文字列も含まないことを検証する。
-// 廃止したラベルへの言及が worker のプロンプトから取り除かれていることを確認するために使う。
 func mustNotContainAny(t *testing.T, got string, avoids ...string) {
 	t.Helper()
 	for _, a := range avoids {
 		if strings.Contains(got, a) {
-			t.Fatalf("prompt must not contain %q (deprecated label reference)\n--- full prompt ---\n%s", a, got)
+			t.Fatalf("prompt must not contain %q\n--- full prompt ---\n%s", a, got)
 		}
 	}
 }
 
-func testContext() Context {
+func testIssueContext() Context {
 	return Context{
 		RepoName: "k-wa-wa/pechka",
 		Kind:     KindIssue,
 		Number:   42,
 		Title:    "ログイン画面のバグを直す",
+		Body:     "ログインボタンを押しても反応しない。",
 	}
 }
 
-// deprecatedLabels は DESIGN.md 8章のディスパッチャ方式移行に伴い廃止されたラベルである。
-// worker のプロンプトはいずれもこれらへ言及してはならない
-// （agent:awaiting_user_review のみ廃止されておらず、別途検証する）。
-var deprecatedLabels = []string{
+func testPRContext() Context {
+	return Context{
+		RepoName: "k-wa-wa/pechka",
+		Kind:     KindPullRequest,
+		Number:   42,
+		Title:    "fix: ログイン画面のバグを直す",
+		Body:     "Closes #40",
+	}
+}
+
+// deprecatedReferences は旧 4-worker 構成（spec/dev/review/qa）から廃止された概念への
+// 言及である。work/verify のプロンプトはいずれも言及してはならない。
+var deprecatedReferences = []string{
 	"agent:spec",
 	"agent:dev",
 	"agent:review-general",
@@ -47,61 +56,73 @@ var deprecatedLabels = []string{
 	"agent:qa",
 	"agent:wait",
 	"agent:triage",
+	"SpecAgent",
+	"QAAgent",
 }
 
-func TestBuildSpec_IncludesIssueContextAndActionSteps(t *testing.T) {
-	got := BuildSpec(testContext())
+func TestBuildWork_Issue_IncludesBranchAndPRInstructions(t *testing.T) {
+	got := BuildWork(testIssueContext())
 	mustContainAll(t, got,
 		"k-wa-wa/pechka",
-		"仕様定義エージェント (SpecAgent)",
 		"GitHub Issue #42",
 		"ログイン画面のバグを直す",
-		"gh issue view 42 --comments",
+		"feature/issue-42",
+		"git checkout -B feature/issue-42",
+		"Closes #42",
 		"AGENTS.md",
-		"agent:awaiting_user_review",
-		strconv.Itoa(42),
+		"ログインボタンを押しても反応しない。",
+		`"status": "<status>"`,
+		"done | blocked",
 	)
-	mustNotContainAny(t, got, deprecatedLabels...)
-	// バッククォートを使っていないこと（Go の raw string 制約に基づく置換方針の確認）。
+	mustNotContainAny(t, got, deprecatedReferences...)
 	if strings.Contains(got, "`") {
-		t.Fatalf("BuildSpec output must not contain backticks: %q", got)
+		t.Fatalf("BuildWork output must not contain backticks: %q", got)
 	}
 }
 
-func TestBuildDevIssue_IncludesBranchAndPRInstructions(t *testing.T) {
-	ctx := testContext()
-	got := BuildDevIssue(ctx)
+func TestBuildWork_PullRequest_ChecksOutExistingBranch(t *testing.T) {
+	got := BuildWork(testPRContext())
 	mustContainAll(t, got,
-		"開発エージェント (DevAgent)",
-		"GitHub Issue #42",
-		"feature/issue-42",
-		"git checkout -B feature/issue-42",
-		"AGENTS.md",
-		"agent:awaiting_user_review",
-	)
-	mustNotContainAny(t, got, deprecatedLabels...)
-}
-
-func TestBuildDevPR_IncludesReviewFetchAndCheckout(t *testing.T) {
-	ctx := testContext()
-	ctx.Kind = KindPullRequest
-	got := BuildDevPR(ctx)
-	mustContainAll(t, got,
-		"DevAgent - PR修正担当",
 		"GitHub Pull Request #42",
 		"gh pr checkout 42",
+		"新しい PR を作成してはならない",
 		"AGENTS.md",
-		"agent:awaiting_user_review",
+		"done | blocked",
 	)
-	mustNotContainAny(t, got, deprecatedLabels...)
+	mustNotContainAny(t, got, deprecatedReferences...)
 }
 
-func TestBuildReview_IncludesAllReviewPerspectives(t *testing.T) {
-	ctx := testContext()
-	ctx.Kind = KindPullRequest
-	got := BuildReview(ctx)
+func TestBuildWork_IncludesVerifyFailureSummaryWhenPresent(t *testing.T) {
+	ctx := testPRContext()
+	ctx.VerifyFailureSummary = "internal/foo.go:12 の nil チェック漏れでパニックする。"
+	got := BuildWork(ctx)
+	mustContainAll(t, got, "直近の検証結果", ctx.VerifyFailureSummary)
+}
+
+func TestBuildWork_OmitsVerifyFailureSectionWhenAbsent(t *testing.T) {
+	got := BuildWork(testPRContext())
+	mustNotContainAny(t, got, "## 直近の検証結果")
+}
+
+func TestBuildWork_IncludesHumanCommentsWhenPresent(t *testing.T) {
+	ctx := testIssueContext()
+	ctx.HumanComments = []HumanComment{
+		{Author: "k-wa-wa", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Body: "このエンドポイントも直してほしい"},
+	}
+	got := BuildWork(ctx)
+	mustContainAll(t, got, "直近の人間コメント", "k-wa-wa", "このエンドポイントも直してほしい")
+}
+
+func TestBuildWork_AmbiguousRequirementInstructsBlocked(t *testing.T) {
+	got := BuildWork(testIssueContext())
+	mustContainAll(t, got, "要求が曖昧な場合", `status="blocked"`)
+}
+
+func TestBuildVerify_IncludesAllReviewAndExecutionPerspectives(t *testing.T) {
+	got := BuildVerify(testPRContext())
 	mustContainAll(t, got,
-		"Reviewer",
+		"GitHub Pull Request #42",
+		"gh pr checkout 42",
 		"gh pr diff 42",
 		// 旧 review-general が持っていた観点。
 		"パフォーマンス",
@@ -110,35 +131,34 @@ func TestBuildReview_IncludesAllReviewPerspectives(t *testing.T) {
 		"設計規約適合度",
 		"ドキュメントの同期",
 		"影響範囲",
-		"agent:awaiting_user_review",
+		// 旧 qa が持っていた検証項目。
+		"結合・E2Eテスト",
+		"完了基準チェックリスト",
+		"人間による手動マージを待つ",
+		"passed | failed | blocked",
 	)
-	mustNotContainAny(t, got, deprecatedLabels...)
-}
-
-func TestBuildQA_IncludesVerificationAndManualMergePath(t *testing.T) {
-	ctx := testContext()
-	ctx.Kind = KindPullRequest
-	got := BuildQA(ctx)
-	mustContainAll(t, got,
-		"QAAgent",
-		"gh pr checkout 42",
-		"検証項目",
-		"手動でのマージを求める",
-		"agent:awaiting_user_review",
-	)
-	mustNotContainAny(t, got, deprecatedLabels...)
+	mustNotContainAny(t, got, deprecatedReferences...)
 	// 旧実装の自動マージ分岐（オートマージコマンド）は移植していないことを確認する。
 	if strings.Contains(got, "gh pr merge") {
-		t.Fatalf("BuildQA must not include the auto-merge branch: %q", got)
+		t.Fatalf("BuildVerify must not include the auto-merge branch: %q", got)
 	}
+	// verify はコードを変更しないことを明言する。
+	mustContainAll(t, got, "コードは一切変更せず")
 }
 
-func TestAwaitingUserReviewNote_KindBranching(t *testing.T) {
-	issueCtx := Context{Kind: KindIssue, Number: 42}
-	issueGot := awaitingUserReviewNote(issueCtx)
-	mustContainAll(t, issueGot, `gh issue edit 42 --add-label "agent:awaiting_user_review"`)
+func TestBuildVerify_DoesNotChangeCode(t *testing.T) {
+	got := BuildVerify(testPRContext())
+	mustContainAll(t, got, "あなた自身は修正しない")
+}
 
-	prCtx := Context{Kind: KindPullRequest, Number: 42}
-	prGot := awaitingUserReviewNote(prCtx)
-	mustContainAll(t, prGot, `gh pr edit 42 --add-label "agent:awaiting_user_review"`)
+func TestReportNote_ListsGivenStatuses(t *testing.T) {
+	got := reportNote([]string{"done", "blocked"})
+	mustContainAll(t, got, "NUAGE_REPORT_FILE", "done | blocked")
+}
+
+func TestContextSection_EmptyBodyIsMarked(t *testing.T) {
+	ctx := testIssueContext()
+	ctx.Body = ""
+	got := contextSection(ctx)
+	mustContainAll(t, got, "本文", "(無し)")
 }

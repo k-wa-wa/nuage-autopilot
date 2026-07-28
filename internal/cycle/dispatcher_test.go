@@ -82,7 +82,7 @@ func TestDefaultDispatcher_Dispatch_ParsesStructuredOutputOnFirstAttempt(t *test
 	dir := t.TempDir()
 	argsLog := filepath.Join(dir, "args.log")
 	counter := filepath.Join(dir, "counter")
-	wrapper := `{"is_error":false,"result":"{\"number\":1,\"kind\":\"issue\",\"worker\":\"spec\",\"reason\":\"new issue\"}","structured_output":{"number":1,"kind":"issue","worker":"spec","reason":"new issue"}}`
+	wrapper := `{"is_error":false,"result":"{\"number\":1,\"kind\":\"issue\",\"worker\":\"work\",\"reason\":\"new issue\"}","structured_output":{"number":1,"kind":"issue","worker":"work","reason":"new issue"}}`
 	fakeClaude := writeFakeDispatcherClaude(t, argsLog, counter, []string{wrapper})
 
 	d := &DefaultDispatcher{StateDir: t.TempDir(), Logger: testLoggerDiscard(), Command: fakeClaude}
@@ -93,8 +93,8 @@ func TestDefaultDispatcher_Dispatch_ParsesStructuredOutputOnFirstAttempt(t *test
 	if !ok {
 		t.Fatalf("Dispatch() ok = false, want true")
 	}
-	if decision.Number != 1 || decision.Kind != "issue" || decision.Worker != WorkerSpec {
-		t.Fatalf("decision = %+v, want number=1 kind=issue worker=spec", decision)
+	if decision.Number != 1 || decision.Kind != "issue" || decision.Worker != WorkerWork {
+		t.Fatalf("decision = %+v, want number=1 kind=issue worker=work", decision)
 	}
 
 	argsContent, err := os.ReadFile(argsLog)
@@ -119,7 +119,7 @@ func TestDefaultDispatcher_Dispatch_RetriesOnceOnInvalidJSONThenSucceeds(t *test
 	argsLog := filepath.Join(dir, "args.log")
 	counter := filepath.Join(dir, "counter")
 	invalid := `not valid json at all`
-	valid := `{"is_error":false,"result":"{\"number\":2,\"kind\":\"pull_request\",\"worker\":\"review\",\"reason\":\"needs review\"}","structured_output":{"number":2,"kind":"pull_request","worker":"review","reason":"needs review"}}`
+	valid := `{"is_error":false,"result":"{\"number\":2,\"kind\":\"pull_request\",\"worker\":\"verify\",\"reason\":\"needs review\"}","structured_output":{"number":2,"kind":"pull_request","worker":"verify","reason":"needs review"}}`
 	fakeClaude := writeFakeDispatcherClaude(t, argsLog, counter, []string{invalid, valid})
 
 	d := &DefaultDispatcher{StateDir: t.TempDir(), Logger: testLoggerDiscard(), Command: fakeClaude}
@@ -130,8 +130,8 @@ func TestDefaultDispatcher_Dispatch_RetriesOnceOnInvalidJSONThenSucceeds(t *test
 	if !ok {
 		t.Fatalf("Dispatch() ok = false, want true after a successful retry")
 	}
-	if decision.Number != 2 || decision.Kind != "pull_request" || decision.Worker != WorkerReview {
-		t.Fatalf("decision = %+v, want number=2 kind=pull_request worker=review", decision)
+	if decision.Number != 2 || decision.Kind != "pull_request" || decision.Worker != WorkerVerify {
+		t.Fatalf("decision = %+v, want number=2 kind=pull_request worker=verify", decision)
 	}
 
 	counterContent, _ := os.ReadFile(counter)
@@ -190,7 +190,7 @@ func TestDefaultDispatcher_Dispatch_RejectsItemOutsideCandidateSet(t *testing.T)
 	argsLog := filepath.Join(dir, "args.log")
 	counter := filepath.Join(dir, "counter")
 	// number=999 は sampleCandidates() に含まれない。
-	wrapper := `{"is_error":false,"result":"{\"number\":999,\"kind\":\"issue\",\"worker\":\"spec\",\"reason\":\"bogus\"}","structured_output":{"number":999,"kind":"issue","worker":"spec","reason":"bogus"}}`
+	wrapper := `{"is_error":false,"result":"{\"number\":999,\"kind\":\"issue\",\"worker\":\"work\",\"reason\":\"bogus\"}","structured_output":{"number":999,"kind":"issue","worker":"work","reason":"bogus"}}`
 	fakeClaude := writeFakeDispatcherClaude(t, argsLog, counter, []string{wrapper})
 
 	d := &DefaultDispatcher{StateDir: t.TempDir(), Logger: testLoggerDiscard(), Command: fakeClaude}
@@ -212,9 +212,9 @@ func TestDefaultDispatcher_Dispatch_RejectsWorkerKindMismatch(t *testing.T) {
 	dir := t.TempDir()
 	argsLog := filepath.Join(dir, "args.log")
 	counter := filepath.Join(dir, "counter")
-	// number=2 は sampleCandidates() 内で kind=pull_request だが、worker=spec は
-	// Issue にしか選べない。
-	wrapper := `{"is_error":false,"result":"{\"number\":2,\"kind\":\"pull_request\",\"worker\":\"spec\",\"reason\":\"bogus\"}","structured_output":{"number":2,"kind":"pull_request","worker":"spec","reason":"bogus"}}`
+	// number=1 は sampleCandidates() 内で kind=issue だが、worker=verify は
+	// PR にしか選べない。
+	wrapper := `{"is_error":false,"result":"{\"number\":1,\"kind\":\"issue\",\"worker\":\"verify\",\"reason\":\"bogus\"}","structured_output":{"number":1,"kind":"issue","worker":"verify","reason":"bogus"}}`
 	fakeClaude := writeFakeDispatcherClaude(t, argsLog, counter, []string{wrapper})
 
 	d := &DefaultDispatcher{StateDir: t.TempDir(), Logger: testLoggerDiscard(), Command: fakeClaude}
@@ -235,16 +235,14 @@ func TestValidateDecision(t *testing.T) {
 		d       Decision
 		wantErr bool
 	}{
-		{"valid spec on issue", Decision{Number: 1, Kind: "issue", Worker: WorkerSpec}, false},
-		{"valid review on pr", Decision{Number: 2, Kind: "pull_request", Worker: WorkerReview}, false},
-		{"valid dev on issue", Decision{Number: 1, Kind: "issue", Worker: WorkerDev}, false},
-		{"valid dev on pr", Decision{Number: 2, Kind: "pull_request", Worker: WorkerDev}, false},
+		{"valid work on issue", Decision{Number: 1, Kind: "issue", Worker: WorkerWork}, false},
+		{"valid work on pr", Decision{Number: 2, Kind: "pull_request", Worker: WorkerWork}, false},
+		{"valid verify on pr", Decision{Number: 2, Kind: "pull_request", Worker: WorkerVerify}, false},
 		{"none is always valid", Decision{Worker: WorkerNone}, false},
 		{"invalid worker", Decision{Number: 1, Kind: "issue", Worker: "bogus"}, true},
-		{"spec on pr is invalid", Decision{Number: 2, Kind: "pull_request", Worker: WorkerSpec}, true},
-		{"qa on issue is invalid", Decision{Number: 1, Kind: "issue", Worker: WorkerQA}, true},
-		{"number not in candidate set", Decision{Number: 42, Kind: "issue", Worker: WorkerSpec}, true},
-		{"kind mismatch for existing number", Decision{Number: 1, Kind: "pull_request", Worker: WorkerDev}, true},
+		{"verify on issue is invalid", Decision{Number: 1, Kind: "issue", Worker: WorkerVerify}, true},
+		{"number not in candidate set", Decision{Number: 42, Kind: "issue", Worker: WorkerWork}, true},
+		{"kind mismatch for existing number", Decision{Number: 1, Kind: "pull_request", Worker: WorkerWork}, true},
 	}
 
 	for _, tt := range tests {
@@ -280,7 +278,7 @@ func TestBuildDispatchCandidates_SortsTruncatesAndLimitsComments(t *testing.T) {
 		},
 	}
 
-	got := buildDispatchCandidates(items, comments, "nuage-autopilot", buildIssuePRLinks(items))
+	got := buildDispatchCandidates(items, nil, comments, "nuage-autopilot", buildIssuePRLinks(items))
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
@@ -316,9 +314,24 @@ func TestBuildDispatchCandidates_ShortBodyIsNotTruncated(t *testing.T) {
 	items := []Item{
 		{Kind: kindIssue, Number: 1, Title: "t", Author: "alice", Body: "short body"},
 	}
-	got := buildDispatchCandidates(items, nil, "nuage-autopilot", buildIssuePRLinks(items))
+	got := buildDispatchCandidates(items, nil, nil, "nuage-autopilot", buildIssuePRLinks(items))
 	if got[0].Body != "short body" {
 		t.Fatalf("Body = %q, want unchanged short body", got[0].Body)
+	}
+}
+
+func TestBuildDispatchCandidates_CarriesPendingReason(t *testing.T) {
+	items := []Item{
+		{Kind: kindIssue, Number: 1, Title: "t", Author: "alice"},
+		{Kind: kindIssue, Number: 2, Title: "t2", Author: "alice"},
+	}
+	reasons := map[int]string{1: "human commented after the last status line"}
+	got := buildDispatchCandidates(items, reasons, nil, "nuage-autopilot", nil)
+	if got[0].PendingReason != reasons[1] {
+		t.Fatalf("got[0].PendingReason = %q, want %q", got[0].PendingReason, reasons[1])
+	}
+	if got[1].PendingReason != "" {
+		t.Fatalf("got[1].PendingReason = %q, want empty (no reason supplied)", got[1].PendingReason)
 	}
 }
 
@@ -373,7 +386,7 @@ func TestBuildIssuePRLinks_PreservesExcludedPRs(t *testing.T) {
 		{Kind: kindIssue, Number: 10, Title: "Issue 10"},
 	}
 
-	got := buildDispatchCandidates(candidates, nil, "bot", links)
+	got := buildDispatchCandidates(candidates, nil, nil, "bot", links)
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}

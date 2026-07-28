@@ -70,6 +70,13 @@ type Options struct {
 	// を渡すために用意した。worker は指定しない。
 	ExtraArgs []string
 
+	// ExtraEnv は claude サブプロセスに渡す追加の環境変数（"KEY=VALUE" 形式）である。
+	// buildEnv() が組み立てる環境の後ろに追加するため、同名キーがあれば ExtraEnv が
+	// 勝つ（exec.Cmd.Env は重複キーがある場合、後ろの値が使われる）。
+	// worker が結果を書き出す先を伝える NUAGE_REPORT_FILE を渡すために用意した
+	// （internal/cycle/executor.go 参照）。
+	ExtraEnv []string
+
 	// Logger は stdout/stderr を構造化ログとして出力する先。nil の場合 slog.Default()
 	// を使う。
 	Logger *slog.Logger
@@ -129,7 +136,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = opts.WorkDir
-	cmd.Env = buildEnv()
+	cmd.Env = append(buildEnv(), opts.ExtraEnv...)
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 
 	stdout, err := cmd.StdoutPipe()

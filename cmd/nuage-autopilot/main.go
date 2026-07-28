@@ -1,10 +1,12 @@
 // Command nuage-autopilot は GitHub Issue/PR を起点にアプリ開発を自動化する
 // nuage-autopilot の実行バイナリである。詳細は autopilot/DESIGN.md を参照。
 //
-// DESIGN.md 8章「ディスパッチャ方式」に従い、毎サイクル dispatcher (claude haiku,
-// internal/cycle.DefaultDispatcher) が現実の Issue/PR の状態を見てどの worker
-// (spec/dev/review/qa) に渡すかを判断し、選ばれたアイテムについてのみ対象リポジトリを
-// clone した上で worker (claude) を起動する（internal/cycle.DefaultLLMExecutor）。
+// DESIGN.md 8章「ディスパッチャ方式」に従い、毎サイクル遷移表
+// (internal/cycle.nextAction) が現実の Issue/PR の状態から機械的に次の worker
+// (work/verify) を導出する。遷移表だけでは決められない場合にのみ dispatcher
+// (claude haiku, internal/cycle.DefaultDispatcher) を呼ぶ。選ばれたアイテムについて
+// のみ対象リポジトリを clone した上で worker (claude) を起動する
+// （internal/cycle.DefaultLLMExecutor）。
 package main
 
 import (
@@ -67,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	client := github.NewClient(os.Getenv("GH_TOKEN"), githubClientOptions()...)
 	dispatcher := &cycle.DefaultDispatcher{StateDir: cfg.StateDir, Logger: logger}
-	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Repos: cfg.Repos, Logger: logger}
+	executor := &cycle.DefaultLLMExecutor{StateDir: cfg.StateDir, Repos: cfg.Repos, Client: client, Logger: logger}
 
 	// 指定された各リポジトリについて 1 サイクルを実行する。
 	// なお、複数リポジトリの並行・並列処理については将来的に goroutine 等での並列実行化を検討する。

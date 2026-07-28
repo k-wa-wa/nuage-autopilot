@@ -87,18 +87,29 @@ func (e *APIError) Error() string {
 // method で HTTP リクエストを行う。body が非 nil の場合は JSON エンコードして送信し、
 // out が非 nil の場合はレスポンスボディを JSON デコードして書き込む。
 func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
+	_, err := c.requestWithHeader(ctx, method, c.baseURL+path, body, out)
+	return err
+}
+
+// requestWithHeader は request と同じ動作をするが、レスポンスヘッダも返し、かつ
+// url は（c.baseURL を前置しない）完全な URL を受け取る。
+//
+// ページネーションされたエンドポイント（ListComments 等）が、レスポンスの
+// Link ヘッダに含まれる rel="last" の URL をそのまま次のリクエスト先として
+// 使えるようにするために公開している。
+func (c *Client) requestWithHeader(ctx context.Context, method, url string, body, out any) (http.Header, error) {
 	var reqBody io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("github: encode request body: %w", err)
+			return nil, fmt.Errorf("github: encode request body: %w", err)
 		}
 		reqBody = bytes.NewReader(b)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
-		return fmt.Errorf("github: build request: %w", err)
+		return nil, fmt.Errorf("github: build request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -113,24 +124,24 @@ func (c *Client) request(ctx context.Context, method, path string, body, out any
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("github: %s %s: %w", method, path, err)
+		return nil, fmt.Errorf("github: %s %s: %w", method, url, err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("github: %s %s: read response body: %w", method, path, err)
+		return nil, fmt.Errorf("github: %s %s: read response body: %w", method, url, err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: string(data)}
+		return resp.Header, &APIError{Method: method, Path: url, StatusCode: resp.StatusCode, Body: string(data)}
 	}
 
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("github: %s %s: decode response body: %w", method, path, err)
+			return resp.Header, fmt.Errorf("github: %s %s: decode response body: %w", method, url, err)
 		}
 	}
 
-	return nil
+	return resp.Header, nil
 }

@@ -78,6 +78,23 @@ func TestListOpenPullRequests(t *testing.T) {
 	}
 }
 
+func TestGetPullRequest(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/k-wa-wa/pechka/pulls/5" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"number": 5, "title": "add feature", "state": "open", "head": {"sha": "deadbeef"}}`))
+	})
+
+	pr, err := client.GetPullRequest(context.Background(), "k-wa-wa/pechka", 5)
+	if err != nil {
+		t.Fatalf("GetPullRequest() error = %v", err)
+	}
+	if pr.Number != 5 || pr.HeadSHA != "deadbeef" {
+		t.Fatalf("pr = %+v, want Number=5 HeadSHA=deadbeef", pr)
+	}
+}
+
 func TestAddLabel(t *testing.T) {
 	var gotBody map[string][]string
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +173,60 @@ func TestListComments(t *testing.T) {
 	}
 	if len(comments) != 1 || comments[0].User.Login != "alice" {
 		t.Fatalf("comments = %+v, want single comment from alice", comments)
+	}
+}
+
+func TestListComments_FollowsLinkHeaderToLastPage(t *testing.T) {
+	var requestedURLs []string
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requestedURLs = append(requestedURLs, r.URL.String())
+		switch {
+		case r.URL.Path == "/repos/k-wa-wa/pechka/issues/3/comments" && r.URL.RawQuery == "per_page=100":
+			// 1 ページ目（最も古い 100 件）のレスポンス。rel="last" で 2 ページ目を指す。
+			lastURL := "http://" + r.Host + "/repos/k-wa-wa/pechka/issues/3/comments?per_page=100&page=2"
+			w.Header().Set("Link", `<`+lastURL+`>; rel="last"`)
+			_, _ = w.Write([]byte(`[{"id": 1, "body": "oldest (page 1)", "user": {"login": "alice", "type": "User"}, "created_at": "2026-01-01T00:00:00Z"}]`))
+		case r.URL.Path == "/repos/k-wa-wa/pechka/issues/3/comments" && r.URL.RawQuery == "per_page=100&page=2":
+			_, _ = w.Write([]byte(`[{"id": 2, "body": "newest (page 2)", "user": {"login": "bob", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
+		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.String())
+		}
+	})
+
+	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3, true)
+	if err != nil {
+		t.Fatalf("ListComments() error = %v", err)
+	}
+	// 1 ページ目の内容は使われず、Link ヘッダが指す最終ページのみが返る。
+	if len(comments) != 1 || comments[0].Body != "newest (page 2)" {
+		t.Fatalf("comments = %+v, want only the last page's comment", comments)
+	}
+	if len(requestedURLs) != 3 {
+		t.Fatalf("requestedURLs = %v, want exactly 3 requests (comments page 1, comments last page, reviews)", requestedURLs)
+	}
+}
+
+func TestListComments_NoLinkHeaderUsesSinglePageAsIs(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues/3/comments":
+			// Link ヘッダを付けない（1 ページに収まる場合の挙動）。
+			_, _ = w.Write([]byte(`[{"id": 1, "body": "only comment", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	})
+
+	comments, err := client.ListComments(context.Background(), "k-wa-wa/pechka", 3, true)
+	if err != nil {
+		t.Fatalf("ListComments() error = %v", err)
+	}
+	if len(comments) != 1 || comments[0].Body != "only comment" {
+		t.Fatalf("comments = %+v, want the single comment from the only page", comments)
 	}
 }
 

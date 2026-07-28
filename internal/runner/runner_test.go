@@ -142,6 +142,31 @@ func TestRun_PassesModelAndExtraArgs(t *testing.T) {
 	}
 }
 
+func TestRun_PassesExtraEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\ncat > /dev/null\necho \"NUAGE_REPORT_FILE=$NUAGE_REPORT_FILE\"\n"
+	if runtime.GOOS == "windows" {
+		t.Skip("fake claude script assumes a POSIX shell")
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude script: %v", err)
+	}
+
+	result, err := Run(context.Background(), Options{
+		Command:  path,
+		WorkDir:  t.TempDir(),
+		Prompt:   "x",
+		ExtraEnv: []string{"NUAGE_REPORT_FILE=/tmp/report.json"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(result.Stdout, "NUAGE_REPORT_FILE=/tmp/report.json") {
+		t.Fatalf("result.Stdout = %q, want it to contain the extra env var", result.Stdout)
+	}
+}
+
 func TestRun_OmitsModelFlagWhenEmpty(t *testing.T) {
 	fakeClaude := writeArgEchoingFakeClaude(t)
 

@@ -64,10 +64,11 @@ nuage-workspace/
     └── internal/
         ├── config/                 # フラグ・環境変数の解決
         ├── github/                 # Issue / PR / label 操作 (net/http)
-        ├── prompt/                 # 各フェーズのプロンプト定義
+        ├── prompt/                 # 各 worker (work/verify) のプロンプト定義
+        ├── report/                 # worker <-> nuage-autopilot 間の結果受け渡しプロトコル
         ├── repo/                   # 対象リポジトリの clone / 更新
         ├── runner/                 # LLM CLI (claude) の起動
-        └── cycle/                  # 1 サイクルの制御フロー
+        └── cycle/                  # 1 サイクルの制御フロー（遷移表・dispatcher）
 ```
 
 ## 5. Go 実装の方針
@@ -138,7 +139,7 @@ systemd.services.nuage-autopilot = {
 Nix の純粋性はビルドサンドボックス内の話であり、ランタイムの I/O には hash は不要。
 毎回最新を取得するのが正しい。
 
-## 8. ディスパッチャ方式
+## 8. 遷移表と worker 選択
 
 ### ラベルをプログラムカウンタにしない
 
@@ -147,22 +148,36 @@ Nix の純粋性はビルドサンドボックス内の話であり、ランタ�
 
 ラベルは真の状態の写像にすぎず、必ずズレる（手動編集、遷移の取りこぼし、複数ラベルの同時付与）。
 そこで本設計では **毎サイクル、現実から状態を導出し直す**。
-PR が存在するか、CI が通っているか、未対応のレビュー指摘があるか — これらが真の状態である。
+CI が通っているか、状態行が何を報告しているか、状態行以降に新しいコミットが積まれたか、
+未対応の人間コメントがあるか — これらが真の状態である。
 
 結果としてラベルは 2 つだけになり、いずれも「制御」の役割しか持たない。
 
 | ラベル | 役割 | 外す人 |
 | :-- | :-- | :-- |
-| `agent:running` | ロック。実行中を示す | 人間（自動回収は将来課題） |
+| `agent:running` | ロック。実行中を示す | 人間（自動回収は行わない。「他プロセスが起動している可能性」を Go 側からは判別できないため） |
 | `agent:awaiting_user_review` | ゲート。人間の対応待ち | 人間 |
 
 **対象の選別はオプトアウト方式**とする。`agent:` ラベルが 1 つも付いていない open な
 Issue/PR がすべて対象になる。エージェントに触らせたくないものには
 `agent:awaiting_user_review` を人間が付けて止める。
 
-`agent:awaiting_user_review` は worker 自身がプロンプト内で `gh` を叩いて付与する。
-Go 側はこの付与に関与しない。解除は人間がラベルを外すことで行う。
+`agent:awaiting_user_review` は worker 自身ではなく **nuage-autopilot (Go) が** 付与する
+（`status="blocked"` の報告を受けたとき、または worker が有効な報告を残せなかったとき。
+「状態行プロトコル」節を参照）。解除は人間がラベルを外すことで行う。
 コメントの投稿による自動解除は行わない（書きかけの返信で動き出す事故を防ぐため）。
+
+### なぜ遷移表なのか
+
+「次にどの worker を起動すべきか」の大半は、CI 状態・状態行・コミット SHA・関連 PR の
+有無から機械的に導出できる。これを毎回 LLM (dispatcher) に自然言語のルールとして
+判断させるのは、有限状態機械を確率的な手段で再実装しているに等しく、パース失敗や
+解釈揺れによる空転を生む。
+
+そこで本設計では、この導出を Go の**遷移表** (`internal/cycle/transition.go`) として
+決定的に実装する。dispatcher (LLM) が呼ばれるのは、遷移表が「直近の人間コメントの
+意図を読む必要がある」と判定した場合（`ask`）に限られる。日常的なサイクル（CI 待ち、
+verify 合格待ちのマージ待ち、work 完了後の verify 起動など）は **LLM を一切呼ばない**。
 
 ### 1 サイクルの流れ
 
@@ -170,70 +185,134 @@ Go 側はこの付与に関与しない。解除は人間がラベルを外す�
 1. open な Issue/PR を取得し、agent: ラベルが付いているものを除外する
 2. 残りが 0 件なら LLM を呼ばずに終了する
 3. ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付けて終了する
-4. dispatcher (claude haiku) を 1 回だけ呼び、「どのアイテムを、どの worker に渡すか」を決めさせる
-5. 選ばれたアイテムに agent:running を付ける
-6. 対象リポジトリを clone / 更新し、worker (claude) を起動する
-7. 終了したら agent:running を外す
+4. 残った候補それぞれについて遷移表を評価する
+   -> work / verify が機械的に決まった候補（decisive）と、
+      人間コメントの意図を読む必要がある候補（ask）に分かれる
+5. decisive な候補があれば、その中から 1 件選ぶ（PR を優先し、同種なら updated_at が
+   古いものを優先する）
+6. decisive な候補が無く ask な候補がある場合のみ、それらを dispatcher (claude haiku)
+   に渡して 1 件選ばせる
+7. 選ばれたアイテムに agent:running を付ける
+8. 対象リポジトリを clone / 更新し、worker (claude) を起動する
+9. worker が残した報告を読み、結果コメントの投稿と（必要なら）
+   agent:awaiting_user_review の付与を nuage-autopilot 自身が行う
+10. agent:running を外す
 ```
-
-dispatcher へは Issue/PR の**本文・直近のコメント履歴・CI 状態 (`ci_status`)・関連オープン PR (`related_open_prs`)** を渡す。
-番号・種別・タイトルだけでは「仕様が固まっているか」「レビューが通ったのか落ちたのか」「CI が通過しているか」を
-判別できず、ルーティングを誤るためである。
-
-ただし **clone はしない**。リポジトリの中身を読む必要があるのは worker であり、
-dispatcher は GitHub 上の情報だけで判断できる。clone は worker が必要になった
-時点（手順 6）で初めて行う。
-
-本文とコメントは文字数で切り詰めたうえで渡す。切り詰めた場合はその旨が分かる形にし、
-dispatcher が「情報が欠けている」と認識できるようにする。
-
-### dispatcher の契約
-
-- モデルは `claude-haiku-4-5-20251001` を明示指定する（判断のみで実装を伴わないため）
-- **1 サイクルにつき 1 コール**。アイテムごとに呼ばない
-- 出力は厳密な JSON とし、Go 側で検証する
-
-```json
-{ "number": 42, "kind": "issue", "worker": "dev", "reason": "..." }
-```
-
-- `worker` は `spec` / `dev` / `review` / `qa` / `none` のいずれか
-- `number` と `kind` は手順 1 で取得した集合に含まれていなければならない
-- パース失敗または不正値の場合は 1 回だけ再試行し、それでも駄目なら何もせず終了する
-  （アイテムにラベルを付けないため、次サイクルで再度試行される）
 
 ### worker
 
-Phase 3 で旧 `nuage-agent` から移植したプロンプトを worker として使う。
-ただし **review-general と review-semantic は 1 つの `review` に統合**し、4 種類とする。
-dispatcher が柔軟に選べる以上、一般レビューと設計レビューを別フェーズに分ける必然性が薄いため。
+4 フェーズ（spec/dev/review/qa）は **`work` と `verify` の 2 つに統合**した。
+フェーズを跨ぐたびに引き継げるコンテキストが GitHub コメント（文字数で切り詰め済み）
+経由に限られ、目減りしていたことが最大の理由である。
 
-| worker | 役割 |
-| :-- | :-- |
-| `spec` | 要求を PRD と受け入れ基準に落とす。曖昧なら質問して `agent:awaiting_user_review` を付ける |
-| `dev` | ブランチを切り実装し、テスト通過まで自己修復して PR を作成する |
-| `review` | バグ・セキュリティ・性能に加え、設計規約・影響範囲を検証する |
-| `qa` | preview 環境に対する E2E を含む最終検証を行う |
+| worker | 対象 | 役割 |
+| :-- | :-- | :-- |
+| `work` | Issue / PR | 要求を理解し、実装し、テストが通る状態にして PR を作成・更新する。要求が曖昧な場合は実装せず `status="blocked"` とする（旧 `spec` の役割を内包） |
+| `verify` | PR のみ | コードは一切変更せず、差分の静的レビュー（バグ・セキュリティ・性能・設計規約・影響範囲）と実行検証（統合テスト・E2E・完了基準チェック）を行う（旧 `review` + `qa` の統合） |
 
-### 状態行プロトコル
+`work` が Issue から実装した PR を作る場合、PR 本文に必ず `Closes #<issue番号>` を
+含めさせる。Issue ↔ PR の紐付け（`related_open_prs` / 遷移表の「関連 PR」判定）は
+この記法を正規表現で抽出することで決定的に行う（`internal/cycle/dispatcher.go` の
+`extractRelatedIssueNumbers`）。
 
-worker と dispatcher の間では、結果コメントの 1 行目に埋め込まれる状態行コメントを共通の契約プロトコルとして扱う。
+### 状態行プロトコル（`internal/report`）
 
-```html
-<!-- nuage-autopilot worker=<worker_name> status=<passed|failed|done|blocked> -->
+worker は結果コメントを自身で投稿しない。**投稿するのは常に nuage-autopilot (Go)
+自身である。** worker がプロンプト内の `gh` コマンドでコメントを投稿していた旧方式は、
+書式の崩れや無言終了のたびに状態行が失われ、ループ上限判定や次サイクルの判断を
+狂わせていた。
+
+worker は、環境変数 `NUAGE_REPORT_FILE` が指すパスに、終了前に次の JSON を書き出すだけでよい。
+
+```json
+{ "status": "done", "summary": "実装した内容・検証結果・次のステップの要約" }
 ```
 
-- `passed`:  検証・レビューに合格した
-- `failed`:  検証・レビューに不合格であり、実装の修正が必要である
-- `done`:    仕様策定・実装など、担当した作業そのものを完了した
-- `blocked`: 人間の判断が必要であり、作業を中断した（`agent:awaiting_user_review` を付与する）
+nuage-autopilot はこのファイルを読み、状態行 + summary からなるコメントを組み立てて
+GitHub に投稿する。
 
-dispatcher は最新コメントの状態行を最優先で参照し、直前の worker の成果および成否（例: `review` の `status=passed` → 次は `qa`、`status=failed` → 次は `dev`）を判定する。
+```html
+<!-- nuage-autopilot worker=<work|verify> status=<done|passed|failed|blocked> sha=<40hex> -->
+```
+
+- `sha` は PR に対する実行のみ含める（Issue では省略）。worker 実行後、GitHub から
+  権威ある head SHA を再取得して埋める（`internal/github.Client.GetPullRequest`）。
+  これが遷移表の「状態行以降に新しいコミットが積まれたか」判定の基礎になる
+- `status` に許される値は worker ごとに異なる（`internal/report.ValidStatus`）
+  - `work`: `done`（完了） / `blocked`（人間の判断が必要）
+  - `verify`: `passed`（合格） / `failed`（不合格、実装の修正が必要） / `blocked`
+- `blocked` の場合、nuage-autopilot が `agent:awaiting_user_review` を付与する
+
+report ファイルが存在しない・JSON として不正・その worker にとって妥当でない
+`status` である場合、nuage-autopilot は **`status="blocked"` を自ら合成**して投稿し、
+`agent:awaiting_user_review` を付与する。worker の無言終了・書式崩れが致命的に
+ならないようにするための設計であり、これによりループ上限判定（Bot コメント数）が
+確実に機能する。
+
+### 遷移表（`internal/cycle/transition.go`）
+
+各候補について、コメント履歴から**最新の自分自身（botLogin）の状態行**と、
+**それより新しい人間コメントの有無**を導出したうえで（`deriveState`）、以下の表を
+上から順に評価し、最初に一致した結果を採用する。
+
+#### PR
+
+| # | 条件 | 結果 |
+| :-- | :-- | :-- |
+| 1 | draft である | `none` |
+| 2 | 状態行より新しい人間コメントがある | `ask` |
+| 3 | CI が pending | `none` |
+| 4 | CI が failure | `work` |
+| 5 | 状態行が無い | `verify`（新規 PR、CI は通っている） |
+| 6 | 状態行の sha が現在の head SHA と異なる | `verify`（状態行以降に新しいコミットがある） |
+| 7 | 状態行が `blocked` | 状態行の worker に差し戻す（ラベル解除後の再開） |
+| 8 | 状態行が `verify status=failed` | `work` |
+| 9 | 状態行が `work status=done` | `verify` |
+| 10 | 状態行が `verify status=passed` | `none`（終端。人間のマージ待ち） |
+| 11 | それ以外 | `none`（安全側。ループ上限が backstop） |
+
+人間コメント（#2）を CI 状態（#3, #4）より優先する。CI が落ちていても人間が
+「まだ触らないで」と言っていれば、機械的な `ci=failure -> work` で上書きしてはならない。
+
+`verify status=passed` の PR に人間が追加 push した場合、ラベル等で候補から
+除外することはしない。#6 の sha 比較が自動的に検知し、`verify` に戻す。
+
+#### Issue
+
+| # | 条件 | 結果 |
+| :-- | :-- | :-- |
+| 1 | 関連する open PR がある | `none`（PR 側で進む） |
+| 2 | 状態行より新しい人間コメントがある | `ask` |
+| 3 | 状態行が無い | `work`（未着手） |
+| 4 | 状態行が `blocked` | 状態行の worker に差し戻す |
+| 5 | 状態行が `work status=done` | `none`（PR を伴わない完了。人間の対応待ち） |
+| 6 | それ以外 | `none` |
+
+### dispatcher の契約
+
+dispatcher が呼ばれるのは、遷移表が `ask` と判定した候補が存在し、かつ機械的に
+決まる（decisive な）候補が 1 件も無いときだけである。判断の対象は 1 点のみ：
+**直近の人間コメントの意図が「修正の指示」「再検証の依頼」「対応不要」のどれか**。
+CI 状態や関連 PR の有無による自動ルーティングは遷移表の責務であり、dispatcher の
+プロンプトには含めない。
+
+- モデルは `claude-haiku-4-5-20251001` を明示指定する（判断のみで実装を伴わないため）
+- **1 サイクルにつき 1 コール**。候補ごとに呼ばない
+- 出力は厳密な JSON とし、Go 側で検証する
+
+```json
+{ "number": 42, "kind": "issue", "worker": "work", "reason": "..." }
+```
+
+- `worker` は `work` / `verify` / `none` のいずれか
+- `number` と `kind` は渡した候補集合（`ask` と判定されたものだけ）に含まれていなければならない
+- パース失敗または不正値の場合は 1 回だけ再試行し、それでも駄目なら何もせず終了する
+  （アイテムにラベルを付けないため、次サイクルで再度試行される）
 
 ### ループ上限（Go 側の硬い制限）
 
 「ユーザー待ち以外は処理を続ける」方針のため、終端に到達しないアイテムが
-永久に回り続けうる。dispatcher の判断には依存せず、Go 側で確実に止める。
+永久に回り続けうる。dispatcher・遷移表の判断には依存せず、Go 側で確実に止める。
 
 **判定**: アイテムのコメントを新しい順に見て、**最後の人間のコメント以降に投稿された
 Bot コメントの数**を数える。これが上限（既定 5）以上なら
@@ -243,20 +322,22 @@ Bot コメントの数**を数える。これが上限（既定 5）以上なら
 モデルと一致する。Bot の判定には Phase 2 で実装した `CurrentUser()` と
 コメント投稿者の `type` を用いる。
 
-制約: worker が必ずコメントを残すとは限らないため、この計数は下限の近似である。
-取りこぼしても実害は「もう少し回る」だけなので、当面はこれで十分とする。
+制約: worker が必ず report ファイルを残すとは限らないが、その場合も nuage-autopilot が
+合成した `blocked` コメントを必ず投稿するため（「状態行プロトコル」節）、この計数の
+取りこぼしは実質的に生じない。
 
-### 将来課題: `agent:running` の自動回収
+### `agent:running` の自動回収は行わない
 
 クラッシュや `TimeoutStartSec` による強制終了で `agent:running` が残ると、
-そのアイテムは人間が外すまで対象外のままになる。当面は手動運用とする。
+そのアイテムは人間が外すまで対象外のままになる。
 
-自動化する場合は **dispatcher とは別の systemd unit（janitor）** に分けるのが良い。
-ラベルの後始末は判断を伴わないため LLM が不要で、決定的な Go の処理として書ける。
-
-その際の注意点として、**janitor の閾値は `TimeoutStartSec` より確実に大きく取る必要がある**。
-dev フェーズの実行中は Issue の `updated_at` が更新されないため、
-閾値が短いと生きている実行からラベルを剥がし、同一アイテムに worker が二重に走る。
+自動回収（例: 起動時に無条件で全リポジトリの `agent:running` を剥がす）は、
+**他プロセスが同時に稼働している可能性がある運用**では安全ではないため採用しない。
+`Type=oneshot` の単一 systemd unit 前提であれば「起動時点で見つかった
+`agent:running` は残骸である」と言えるが、この前提が崩れる運用形態
+（手動での並行実行、複数ホストからの起動等）を将来にわたって排除できない限り、
+自動回収はラベルの二重付与・worker の二重起動という事故につながる。
+当面は手動運用とする。
 
 ## 9. テスト戦略
 
