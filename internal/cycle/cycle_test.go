@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,6 +79,9 @@ func (m *mockServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/k-wa-wa/pechka/labels":
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{}`))
+		return
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs"):
+		_, _ = w.Write([]byte(`{"total_count": 0, "check_runs": []}`))
 		return
 	}
 
@@ -150,7 +154,7 @@ func TestRun_NoActionWhenRepoHasNothingOpen(t *testing.T) {
 	m := newMockServer(t)
 	dispatcher := &fakeDispatcher{}
 
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -176,7 +180,7 @@ func TestRun_ExcludesItemsWithAnyAgentLabel(t *testing.T) {
 	}
 
 	dispatcher := &fakeDispatcher{}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -196,7 +200,7 @@ func TestRun_PassesOnlyEligibleItemsAsCandidatesToDispatcher(t *testing.T) {
 	}
 
 	dispatcher := &fakeDispatcher{ok: false}
-	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -234,7 +238,7 @@ func TestRun_LoopLimitLabelsAwaitingUserReviewAndSkipsDispatch(t *testing.T) {
 	m.comments[4] = comments
 
 	dispatcher := &fakeDispatcher{}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -273,7 +277,7 @@ func TestRun_HumanCommentResetsLoopCounterAndDispatcherIsCalled(t *testing.T) {
 	m.comments[9] = comments
 
 	dispatcher := &fakeDispatcher{ok: false}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -293,7 +297,7 @@ func TestRun_DispatchesToWorkerAndTogglesRunningLabel(t *testing.T) {
 
 	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 7, Kind: "issue", Worker: WorkerDev, Reason: "spec approved"}}
 	executor := &fakeExecutor{}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -306,8 +310,9 @@ func TestRun_DispatchesToWorkerAndTogglesRunningLabel(t *testing.T) {
 	}
 
 	if len(executor.calls) != 1 {
-		t.Fatalf("executor.calls = %+v, want exactly 1 call", executor.calls)
+		t.Fatalf("executor.calls = %d, want 1", len(executor.calls))
 	}
+
 	call := executor.calls[0]
 	if call.Repo != "k-wa-wa/pechka" || call.Number != 7 || call.Worker != WorkerDev {
 		t.Fatalf("executor call = %+v, want repo=k-wa-wa/pechka number=7 worker=%s", call, WorkerDev)
@@ -327,6 +332,27 @@ func TestRun_DispatchesToWorkerAndTogglesRunningLabel(t *testing.T) {
 	}
 }
 
+func TestRun_AllowedAuthorsFilter(t *testing.T) {
+	m := newMockServer(t)
+	m.issues = []map[string]any{
+		{"number": 1, "title": "allowed issue", "state": "open", "labels": []any{}, "user": map[string]string{"login": "k-wa-wa", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+		{"number": 2, "title": "unallowed issue", "state": "open", "labels": []any{}, "user": map[string]string{"login": "untrusted", "type": "User"}, "created_at": rfc3339(time.Now()), "updated_at": rfc3339(time.Now())},
+	}
+
+	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 1, Kind: "issue", Worker: WorkerSpec}}
+	executor := &fakeExecutor{}
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", []string{"k-wa-wa", "bot-wa-wa"})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ItemNumber != 1 {
+		t.Fatalf("result.ItemNumber = %d, want 1", result.ItemNumber)
+	}
+	if len(dispatcher.calls) != 1 || len(dispatcher.calls[0].Candidates) != 1 {
+		t.Fatalf("dispatcher candidates count = %d, want 1 (unallowed author excluded)", len(dispatcher.calls[0].Candidates))
+	}
+}
+
 func TestRun_DispatcherNoDecisionResultsInNoop(t *testing.T) {
 	m := newMockServer(t)
 	m.issues = []map[string]any{
@@ -335,7 +361,7 @@ func TestRun_DispatcherNoDecisionResultsInNoop(t *testing.T) {
 
 	dispatcher := &fakeDispatcher{ok: false}
 	executor := &fakeExecutor{}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -357,7 +383,7 @@ func TestRun_DispatcherErrorPropagates(t *testing.T) {
 	}
 
 	dispatcher := &fakeDispatcher{err: errors.New("boom")}
-	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	_, err := Run(context.Background(), testLogger(), m.client(), dispatcher, &fakeExecutor{}, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err == nil {
 		t.Fatalf("Run() error = nil, want an error when the dispatcher itself fails")
 	}
@@ -374,7 +400,7 @@ func TestRun_WorkerFailureIsNotFatalAndClearsRunningLabel(t *testing.T) {
 
 	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 12, Kind: "issue", Worker: WorkerDev}}
 	executor := &fakeExecutor{err: errors.New("claude exited with non-zero status")}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil (worker failure must not fail the cycle)", err)
 	}
@@ -400,7 +426,7 @@ func TestRun_ProcessesOnlyOneItemPerCycleEvenWithMultipleCandidates(t *testing.T
 
 	dispatcher := &fakeDispatcher{ok: true, decision: Decision{Number: 20, Kind: "issue", Worker: WorkerSpec}}
 	executor := &fakeExecutor{}
-	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot")
+	result, err := Run(context.Background(), testLogger(), m.client(), dispatcher, executor, "k-wa-wa/pechka", "/var/lib/nuage-autopilot", nil)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}

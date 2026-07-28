@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/k-wa-wa/nuage-workspace/autopilot/internal/github"
@@ -80,7 +81,7 @@ type Result struct {
 //  5. 選ばれたアイテムに agent:running を付ける。
 //  6. 対象リポジトリを clone/更新し、worker (claude) を起動する。
 //  7. 終了したら agent:running を外す。
-func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispatcher Dispatcher, executor LLMExecutor, repo, stateDir string) (Result, error) {
+func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispatcher Dispatcher, executor LLMExecutor, repo, stateDir string, allowedAuthors []string) (Result, error) {
 	result := Result{
 		Repo:      repo,
 		StateDir:  stateDir,
@@ -109,10 +110,15 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		items = append(items, pullRequestToItem(p))
 	}
 
-	// (1) agent: ラベルが 1 つでも付いているアイテムは対象外（オプトアウト方式）。
+	// (1) 候補の絞り込み:
+	// - agent: ラベルが 1 つでも付いているアイテムは対象外（オプトアウト方式）。
+	// - allowedAuthors が指定されている場合、作成者が含まれていないアイテムは対象外。
 	var candidates []Item
 	for _, it := range items {
 		if hasAgentLabel(it.Labels) {
+			continue
+		}
+		if !isAllowedAuthor(it.Author, allowedAuthors) {
 			continue
 		}
 		candidates = append(candidates, it)
@@ -120,7 +126,7 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 
 	// (2) 対象が 0 件なら LLM を呼ばずに終了する。
 	if len(candidates) == 0 {
-		logger.Info("no eligible item this cycle (all items are excluded by an agent: label, or the repository has nothing open)",
+		logger.Info("no eligible item this cycle (all items are excluded by an agent: label, author filter, or the repository has nothing open)",
 			"repo", repo)
 		return result, nil
 	}
@@ -130,15 +136,25 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		return result, fmt.Errorf("cycle: resolve current user: %w", err)
 	}
 
-	// 各候補のコメントを 1 回だけ取得し、(3) のループ上限判定と (4) の dispatcher への
-	// メタデータ提示の両方に使い回す。
+	// 各候補のコメントと CI チェックラン状態を取得する。
 	commentsByNumber := make(map[int][]github.Comment, len(candidates))
-	for _, it := range candidates {
+	for i := range candidates {
+		it := &candidates[i]
 		comments, err := client.ListComments(ctx, repo, it.Number)
 		if err != nil {
 			return result, fmt.Errorf("cycle: list comments for %s#%d: %w", repo, it.Number, err)
 		}
 		commentsByNumber[it.Number] = comments
+
+		if it.Kind == kindPullRequest && it.HeadSHA != "" {
+			st, err := client.GetCheckState(ctx, repo, it.HeadSHA)
+			if err != nil {
+				logger.Warn("failed to fetch CI check runs; defaulting to none", "repo", repo, "pr", it.Number, "error", err.Error())
+				it.CIStatus = "none"
+			} else {
+				it.CIStatus = st
+			}
+		}
 	}
 
 	// (3) ループ上限に達しているアイテムがあれば agent:awaiting_user_review を付けて
@@ -227,4 +243,16 @@ func Run(ctx context.Context, logger *slog.Logger, client *github.Client, dispat
 		"repo", repo, "issue_number", chosen.Number, "worker", decision.Worker)
 	result.Action = ActionWorkerExecuted
 	return result, nil
+}
+
+func isAllowedAuthor(author string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, a := range allowed {
+		if strings.EqualFold(a, author) {
+			return true
+		}
+	}
+	return false
 }

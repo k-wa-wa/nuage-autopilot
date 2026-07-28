@@ -11,11 +11,17 @@ import (
 // DefaultStateDir は --state-dir / NUAGE_STATE_DIR のいずれも指定されなかった場合の既定値である。
 const DefaultStateDir = "/var/lib/nuage-autopilot"
 
+// DefaultAllowedAuthors は --allowed-authors / NUAGE_ALLOWED_AUTHORS のいずれも指定されなかった場合の既定値である。
+const DefaultAllowedAuthors = "k-wa-wa,bot-wa-wa"
+
 // Config は 1 回の起動で使用する設定値を保持する。
 type Config struct {
 	// Repos は今回の起動で巡回・チェックする対象リポジトリの一覧（"owner/name" 形式）。
 	// --repos フラグ（カンマ区切り、例: "k-wa-wa/pechka,k-wa-wa/nuage-workspace"）で指定される。
 	Repos []string
+
+	// AllowedAuthors は候補として処理を許可する Issue/PR の作成者一覧。
+	AllowedAuthors []string
 
 	// StateDir はリポジトリの clone やサイクルの作業状態を置くディレクトリである。
 	StateDir string
@@ -29,20 +35,6 @@ type Config struct {
 var ErrRepoRequired = errors.New("--repos は必須である（例: --repos k-wa-wa/pechka,k-wa-wa/nuage-workspace）")
 
 // RequiredEnvVars は 1 サイクルを実行するために最低限必要な環境変数である。
-//
-// これらは /var/lib/nuage-autopilot/secrets.env から EnvironmentFile 経由で注入される。
-// 同ファイルは SOPS で配布せず手作業で配置する運用のため、VM を作った直後は存在しない。
-// その状態を異常終了として扱うとタイマー実行のたびに service が失敗して
-// 通知が埋もれるため、警告を残して正常終了する（DESIGN.md 10.5 節）。
-//
-// claude の認証情報は CLI の TUI でサインインして各ユーザーの HOME に保存されるため、
-// 環境変数としては要求しない。
-//
-// GH_TOKEN は GitHub API 操作および git の credential helper（internal/repo が
-// `gh auth setup-git` 経由で設定する）の認証に用いる。
-// GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL は claude が自律的に行う commit の名義に使う
-// （internal/runner が GIT_COMMITTER_* にも同値を設定する）。フェーズ3で実際に
-// claude が commit を行うようになったため必須に加えた。
 var RequiredEnvVars = []string{
 	"GH_TOKEN",
 	"GIT_AUTHOR_NAME",
@@ -65,6 +57,7 @@ func MissingEnv() []string {
 func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("nuage-autopilot", flag.ContinueOnError)
 	reposStr := fs.String("repos", "", "巡回処理対象のリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-workspace)")
+	allowedAuthorsStr := fs.String("allowed-authors", resolveEnvOrDefault("NUAGE_ALLOWED_AUTHORS", DefaultAllowedAuthors), "候補対象とする Issue/PR の作成者一覧 (カンマ区切り)")
 	showVersion := fs.Bool("version", false, "バージョンを表示して終了する")
 
 	if err := fs.Parse(args); err != nil {
@@ -72,11 +65,13 @@ func Parse(args []string) (Config, error) {
 	}
 
 	repos := parseCommaList(*reposStr)
+	allowedAuthors := parseCommaList(*allowedAuthorsStr)
 
 	cfg := Config{
-		Repos:       repos,
-		StateDir:    resolveStateDir(),
-		ShowVersion: *showVersion,
+		Repos:          repos,
+		AllowedAuthors: allowedAuthors,
+		StateDir:       resolveStateDir(),
+		ShowVersion:    *showVersion,
 	}
 
 	if !cfg.ShowVersion && len(cfg.Repos) == 0 {
@@ -108,4 +103,11 @@ func resolveStateDir() string {
 		return v
 	}
 	return DefaultStateDir
+}
+
+func resolveEnvOrDefault(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
 }

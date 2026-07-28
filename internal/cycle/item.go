@@ -24,12 +24,11 @@ type Item struct {
 	Title  string
 	Author string
 
-	// Body は Issue/PR の本文全文（未切り詰め）である。dispatcher に渡す際は
-	// internal/cycle/dispatcher.go の buildDispatchCandidates が切り詰める。
-	// worker はここから clone 後に必要なら全文を読み直せるため、Item の時点では
-	// 切り詰めない。
+	// Body は Issue/PR の本文全文（未切り詰め）である。
 	Body      string
 	Labels    []string
+	HeadSHA   string
+	CIStatus  string // "success", "failure", "pending", "none"
 	UpdatedAt time.Time
 }
 
@@ -53,6 +52,7 @@ func pullRequestToItem(p github.PullRequest) Item {
 		Author:    p.User.Login,
 		Body:      p.Body,
 		Labels:    p.Labels,
+		HeadSHA:   p.HeadSHA,
 		UpdatedAt: p.UpdatedAt,
 	}
 }

@@ -80,21 +80,21 @@ func (r rawIssue) toIssue() Issue {
 
 // rawPullRequest は GET /repos/{repo}/pulls のレスポンス要素をデコードするための型。
 type rawPullRequest struct {
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`
-	Body      string    `json:"body"`
-	Labels    []label   `json:"labels"`
-	User      Author    `json:"user"`
-	Draft     bool      `json:"draft"`
+	Number int     `json:"number"`
+	Title  string  `json:"title"`
+	State  string  `json:"state"`
+	Body   string  `json:"body"`
+	Labels []label `json:"labels"`
+	User   Author  `json:"user"`
+	Draft  bool    `json:"draft"`
+	Head   struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // PullRequest は nuage-autopilot が扱う PR を表す。
-//
-// Body は GET /repos/{repo}/pulls の一覧レスポンスに元々含まれているフィールドであり、
-// Issue.Body と同様に追加の API 呼び出しは発生しない。
 type PullRequest struct {
 	Number    int
 	Title     string
@@ -103,6 +103,7 @@ type PullRequest struct {
 	Labels    []string
 	User      Author
 	Draft     bool
+	HeadSHA   string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -116,9 +117,23 @@ func (r rawPullRequest) toPullRequest() PullRequest {
 		Labels:    labelNames(r.Labels),
 		User:      r.User,
 		Draft:     r.Draft,
+		HeadSHA:   r.Head.SHA,
 		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
 	}
+}
+
+// CheckRun は GitHub の CI チェックラン情報をデコードするための型。
+type CheckRun struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`     // "queued", "in_progress", "completed"
+	Conclusion string `json:"conclusion"` // "success", "failure", "neutral", etc.
+}
+
+// CheckRunsResponse は GET /repos/{repo}/commits/{ref}/check-runs のレスポンス型。
+type CheckRunsResponse struct {
+	TotalCount int        `json:"total_count"`
+	CheckRuns  []CheckRun `json:"check_runs"`
 }
 
 // Comment は Issue/PR に対する会話コメントを表す。

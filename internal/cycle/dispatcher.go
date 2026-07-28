@@ -74,6 +74,9 @@ type DispatchCandidate struct {
 	UpdatedAt time.Time
 	Labels    []string
 
+	// CIStatus は PR コミットに対する CI チェックランの状態 ("success", "failure", "pending", "none") である。
+	CIStatus string
+
 	// Body は Issue/PR 本文を bodyPreviewLimit で切り詰めたものである。切り詰めが
 	// 発生した場合は truncateRunes が末尾に "…" を付与するため、dispatcher 側でも
 	// 「本文の続きが省略されている」と認識できる。
@@ -169,7 +172,7 @@ func (d *DefaultDispatcher) callOnce(ctx context.Context, prompt string, logger 
 		WorkDir:   d.StateDir,
 		Prompt:    prompt,
 		Model:     DispatcherModel,
-		ExtraArgs: []string{"--output-format", "json", "--json-schema", dispatchJSONSchema},
+		ExtraArgs: []string{"--output-format", "json", "--json-schema", dispatchJSONSchema, "--tools", ""},
 		Logger:    logger,
 	})
 	if err != nil {
@@ -289,6 +292,7 @@ func buildDispatchCandidates(items []Item, commentsByNumber map[int][]github.Com
 			Author:         it.Author,
 			UpdatedAt:      it.UpdatedAt,
 			Labels:         it.Labels,
+			CIStatus:       it.CIStatus,
 			Body:           truncateRunes(it.Body, bodyPreviewLimit),
 			RecentComments: summaries,
 		})
@@ -329,8 +333,12 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 		b.WriteString("(候補は無い)\n")
 	}
 	for _, c := range candidates {
-		fmt.Fprintf(&b, "- kind=%s number=%d title=%q author=%s updated_at=%s labels=%v\n",
-			c.Kind, c.Number, c.Title, c.Author, c.UpdatedAt.UTC().Format(time.RFC3339), c.Labels)
+		ciInfo := ""
+		if c.Kind == kindPullRequest && c.CIStatus != "" && c.CIStatus != "none" {
+			ciInfo = fmt.Sprintf(" ci_status=%s", c.CIStatus)
+		}
+		fmt.Fprintf(&b, "- kind=%s number=%d title=%q author=%s updated_at=%s labels=%v%s\n",
+			c.Kind, c.Number, c.Title, c.Author, c.UpdatedAt.UTC().Format(time.RFC3339), c.Labels, ciInfo)
 		if c.Body == "" {
 			b.WriteString("  本文: (無し)\n")
 		} else {
@@ -359,6 +367,7 @@ func buildDispatchPrompt(repo string, candidates []DispatchCandidate) string {
 
 	b.WriteString("## 判断の指針\n")
 	b.WriteString("- 候補一覧には、agent: 接頭辞のラベルが付いていない open な Issue/PR のみが含まれている。\n")
+	b.WriteString("- PR の CI 状態 (ci_status): pending または failure の場合、QA (qa) を割り当ててはならない。failure の場合は開発 (dev) に差し戻し、pending の場合は CI の完了を待つため worker を \"none\" にすること。ci_status が success または none の場合のみ QA を進めてよい。\n")
 	b.WriteString("- 直近のコメントが人間からのものであれば、その内容を踏まえて次の worker を判断する。\n")
 	b.WriteString("- 直近のコメントが nuage-autopilot 自身 (bot) からのものであれば、上記の状態行およびコメント内容から次に必要な worker を決定する。\n")
 	b.WriteString("- コメントが無い、または着手されていない新規の Issue には spec を、まだレビューを受けていない新規の PR には review を割り当てるのが基本である。\n")

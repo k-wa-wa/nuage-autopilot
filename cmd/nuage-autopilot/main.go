@@ -76,7 +76,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			break
 		}
 
-		result, err := cycle.Run(ctx, logger, client, dispatcher, executor, repo, cfg.StateDir)
+		result, err := cycle.Run(ctx, logger, client, dispatcher, executor, repo, cfg.StateDir, cfg.AllowedAuthors)
 		if err != nil {
 			logger.Error("cycle failed", "repo", repo, "error", err.Error())
 			hasError = true
