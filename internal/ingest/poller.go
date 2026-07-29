@@ -172,14 +172,14 @@ func (p *Poller) processItem(ctx context.Context, repo string, kind store.Kind, 
 	}
 
 	if !exists {
-		return p.admitAndBaseline(ctx, repo, kind, number, prevSince, hadPrevSince)
+		return p.admitAndBaseline(ctx, repo, kind, number, botLogin, prevSince, hadPrevSince)
 	}
 
 	return p.diffComments(ctx, item, kind, botLogin)
 }
 
 // admitAndBaseline は DB に無い Issue/PR を新規登録する。
-func (p *Poller) admitAndBaseline(ctx context.Context, repo string, kind store.Kind, number int, prevSince time.Time, hadPrevSince bool) (int, error) {
+func (p *Poller) admitAndBaseline(ctx context.Context, repo string, kind store.Kind, number int, botLogin string, prevSince time.Time, hadPrevSince bool) (int, error) {
 	detail, err := fetchDetail(ctx, p.Client, repo, kind, number)
 	if err != nil {
 		return 0, fmt.Errorf("fetch detail: %w", err)
@@ -207,6 +207,11 @@ func (p *Poller) admitAndBaseline(ctx context.Context, repo string, kind store.K
 	// コメントだけを新着として扱えばよい。
 	if err := p.Store.UpdateItemLastSeenAt(ctx, item.ID, detail.CreatedAt); err != nil {
 		return 0, fmt.Errorf("baseline last_seen_at: %w", err)
+	}
+
+	if detail.Author == botLogin {
+		// Bot 自身が作成した Issue/PR の起票通知ではイベントを起こさない（DESIGN.md 7.3 節）。
+		return 0, nil
 	}
 
 	if !hadPrevSince || !detail.CreatedAt.After(prevSince) {

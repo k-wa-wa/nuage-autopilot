@@ -167,6 +167,46 @@ func TestPoll_GenuinelyNewIssueEnqueuesOpenedEvent(t *testing.T) {
 	}
 }
 
+// TestPoll_BotAuthoredOpenedDoesNotEnqueueEvent は Bot 自身が起票した Issue/PR の通知を
+// 受け取った際、DB 登録は行いつつ opened イベントの着火をスキップすることを検証する。
+func TestPoll_BotAuthoredOpenedDoesNotEnqueueEvent(t *testing.T) {
+	p, st := newTestPoller(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			writeJSON(w, `{"login": "bot-wa-wa"}`)
+		case r.URL.Path == "/notifications":
+			writeJSON(w, `[{"id": "1", "unread": true, "reason": "author", "updated_at": "2026-07-29T00:00:00Z",
+				"subject": {"title": "bot created PR", "url": "https://api.github.com/repos/k-wa-wa/pechka/pulls/100", "type": "PullRequest"},
+				"repository": {"full_name": "k-wa-wa/pechka"}}]`)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/100":
+			writeJSON(w, `{"number": 100, "title": "bot PR", "body": "PR body", "state": "open",
+				"user": {"login": "bot-wa-wa", "type": "User"}, "created_at": "2026-07-29T00:00:00Z"}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	if err := st.SaveCursor(context.Background(), notificationsSource, "", "", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("SaveCursor (seed): %v", err)
+	}
+
+	n, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("enqueued = %d, want 0 (bot authored item must not enqueue opened event)", n)
+	}
+
+	item, ok, err := st.GetItem(context.Background(), "k-wa-wa/pechka", 100)
+	if err != nil || !ok {
+		t.Fatalf("item should still be registered: ok=%v err=%v", ok, err)
+	}
+	if item.Kind != store.KindPullRequest {
+		t.Fatalf("kind = %s, want pull_request", item.Kind)
+	}
+}
+
 // TestPoll_RejectsDisallowedAuthor は NUAGE_ALLOWED_AUTHORS に該当しない作成者の
 // アイテムを DB に登録しないことを検証する。
 func TestPoll_RejectsDisallowedAuthor(t *testing.T) {
