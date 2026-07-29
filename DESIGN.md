@@ -279,13 +279,25 @@ CREATE TABLE cursors (
 
 ### 6.4 SQLite ドライバと vendorHash
 
-**pure-Go の実装（`modernc.org/sqlite`）を使う。** cgo が入ると `buildGoModule` での
-ビルドと後述の `vendorHash = null` 運用が破綻するためである。
+**pure-Go の実装（`github.com/ncruces/go-sqlite3`）を使う。** cgo が入ると
+`buildGoModule` でのビルドと後述の `vendorHash = null` 運用が破綻するためである。
+
+当初 `modernc.org/sqlite` を検討したが、GOOS/GOARCH の組み合わせごとに C→Go
+変換済みコードを vendor するため `vendor/` が 200MB を超えた。`ncruces/go-sqlite3` は
+SQLite 本体を WebAssembly にコンパイルしたバイナリ 1 つを `go:embed` で組み込む方式
+（wazero による pure-Go の WASM ランタイムで実行する）であり、vendor サイズが
+約 14MB に収まる。ビルド・実行時ともネットワークアクセスは不要である。
 
 `buildGoModule` は通常 `vendorHash` を要求し、`go.mod` を変更するたびにハッシュがズレて
 ビルドが落ちる。**このシステムはエージェント自身が依存を追加する**ため、これは致命的である。
 そこで `vendorHash = null` を指定してハッシュ管理を不要にし、`go mod vendor` した
 `vendor/` をコミットすることでこれを成立させる。
+
+`go.mod` の `go` ディレクティブは nixpkgs 24.11 が同梱する Go（1.23.8）を超えない
+バージョンに固定する必要がある。依存を `go get <pkg>@latest` で追加すると、
+Go ツールチェイン自身が要求する `go` ディレクティブを引き上げてしまうことがあるため、
+追加のたびに `go.mod` の `go` 行を確認し、必要なら依存を 1 つ前のマイナーバージョンへ
+固定する。
 
 旧実装は外部依存ゼロ（stdlib のみ）で `vendor/` を持たずに済んでいたが、本設計では
 SQLite ドライバの追加に伴い `vendor/` のコミットが必須になる。依存はこれ以外に
@@ -520,9 +532,17 @@ Go 側の処理は次の通りである。
 全子が `done` になった時点で `child_done` イベントを親に enqueue し、親のエージェントを
 resume する。親は統合・クローズ・追加分割のいずれかを判断する。
 
-親子は**リポジトリを跨いでよい**（`items` は `repo` を持つため表現できる）。
-GitHub ネイティブの sub-issues API は表示上の紐付けとして併用してよいが、
-真実の所在は DB とする。
+`child_done` の dedup_key には「今回全完了の引き金になった子の item id」を含める
+（`child_done:<parent_id>:<child_id>`）。親 id だけをキーにすると、親が将来再び分割し
+子が再び全完了した場合に 2 回目以降の完了が dedup で握りつぶされてしまうためである。
+
+`items` は `repo` を持つため、スキーマ上は親子がリポジトリを跨ぐことを表現できる。
+ただし `outcome="split"` の `children` は Issue 番号の配列のみでリポジトリ情報を
+持たない（8.3 節）ため、**初版ではエージェントが `gh issue create` するサブ Issue は
+常に親と同じリポジトリであることを前提とする**。リポジトリを跨ぐ分割をサポートする
+場合は `children` を `{"repo": "...", "number": N}` の配列に拡張する必要がある
+（現時点では未対応）。GitHub ネイティブの sub-issues API は表示上の紐付けとして
+併用してよいが、真実の所在は DB とする。
 
 ## 10. 予算と安全網
 
@@ -612,7 +632,7 @@ nuage-workspace/
 ├── flake.nix                       # packages を export
 └── autopilot/
     ├── DESIGN.md                   # 本ファイル
-    ├── go.mod / vendor/            # modernc.org/sqlite のため vendor をコミットする
+    ├── go.mod / vendor/            # github.com/ncruces/go-sqlite3 のため vendor をコミットする
     ├── secrets.env.example
     ├── cmd/nuage-autopilot/
     │   └── main.go                 # goroutine の起動と停止のみ
@@ -739,27 +759,32 @@ systemd.services.nuage-autopilot = {
 
 ## 18. 実装フェーズ
 
-### Phase 1: 状態基盤とプロセスの骨格
+### Phase 1: 状態基盤とプロセスの骨格（完了）
 
 `internal/store` の SQLite スキーマとマイグレーション、`items` / `events` / `leases` /
 `cursors` の CRUD。`internal/daemon` の goroutine ループ・`sd_notify`・graceful shutdown。
 この段階では LLM も GitHub も呼ばず、空回りするデーモンとして systemd 上で安定稼働させる。
 
-### Phase 2: 取り込み
+### Phase 2: 取り込み（完了）
 
 notifications ポーラー、自己コメントのフィルタ（7.3 節。**最優先で正しく実装する**）、
 CI チェックランの取得、resync、初回着火の抑止。この段階でイベントが DB に溜まることを
 確認する。
 
-### Phase 3: 遷移とエージェント（初版の完成）
+### Phase 3: 遷移とエージェント（初版の完成。完了）
 
-遷移表、lease、予算、claude の起動とセッション管理、`NUAGE_REPORT_FILE` の読み取り。
-**ストーリー 1 → 2 → 3 → 4 → 6 → 7 → 8 が通ることを目標にする。**
-レビューはエージェントの自己レビューで満たす（8.4 節）。
+遷移表（`internal/engine/transition.go`）、lease、予算、claude の起動とセッション管理
+（`--resume` と `--output-format json` による `session_id`/`total_cost_usd` の取得）、
+`NUAGE_REPORT_FILE` の読み取りを実装した（`internal/engine`、`internal/prompt`）。
+レビューはエージェントの自己レビューで満たす（8.4 節）。verify（第三者レビュー）は
+Phase 5 まで未実装であり、`ready` phase への遷移は `in_review` + `ci_success` から
+直接行う。
 
-### Phase 4: サブ Issue 分割
+### Phase 4: サブ Issue 分割（完了）
 
-`outcome = "split"` と親子伝播、`delegated` phase の運用。
+`outcome = "split"` と親子伝播、`delegated` phase の運用、全子完了時の `child_done`
+enqueue を `internal/engine` に実装した。9章に記載の通り、初版では親と同じリポジトリの
+サブ Issue のみに対応する。
 
 ### Phase 5: verify
 

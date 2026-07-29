@@ -5,10 +5,11 @@
 // internal/daemon 上で動かす（DESIGN.md 5章）。状態は SQLite（internal/store）に持ち、
 // プロセス自体は無状態である。
 //
-// Phase 2（本実装）の時点で Poller/Resyncer は internal/ingest による実装に
-// 差し替わり、GitHub の変化を実際に events として取り込む（DESIGN.md 7章）。
-// internal/engine（遷移表・エージェント起動）はまだ無いため、Worker は
-// プレースホルダのままである（DESIGN.md 18章 Phase 3 で置き換える）。
+// Poller/Resyncer は internal/ingest（DESIGN.md 7章）、Worker は internal/engine
+// （DESIGN.md 8章）がそれぞれ実装する。GitHub の変化を events として取り込み、
+// 遷移表に従ってエージェント（claude）を起動するところまでが揃っている
+// （DESIGN.md 18章 Phase 3）。サブ Issue 分割（Phase 4・DESIGN.md 9章）は
+// internal/engine が扱う outcome="split" として同じ Worker に含まれている。
 package main
 
 import (
@@ -24,6 +25,7 @@ import (
 
 	"autopilot/internal/config"
 	"autopilot/internal/daemon"
+	"autopilot/internal/engine"
 	"autopilot/internal/github"
 	"autopilot/internal/ingest"
 	"autopilot/internal/store"
@@ -102,10 +104,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Logger:         logger,
 	}
 
+	worker := engine.New(engine.Config{
+		Store:    st,
+		Client:   client,
+		StateDir: cfg.StateDir,
+		Repos:    cfg.Repos,
+		Logger:   logger,
+	})
+
 	if err := daemon.Run(ctx, daemon.Config{
 		Logger:   logger,
 		Poller:   poller,
-		Worker:   newPlaceholderWorker(logger, st),
+		Worker:   worker,
 		Resyncer: resyncer,
 	}); err != nil {
 		logger.Error("daemon exited with error", "error", err.Error())
@@ -126,25 +136,4 @@ func githubClientOptions() []github.Option {
 		opts = append(opts, github.WithBaseURL(baseURL))
 	}
 	return opts
-}
-
-// newPlaceholderWorker は Phase 2 時点でのプレースホルダである。実際のイベント処理
-// （DESIGN.md 8章）は internal/engine として Phase 3 で実装する。
-//
-// internal/ingest が events を enqueue するようになった（Phase 2）ため、この
-// 関数はもう到達しうる。未処理イベントを見つけても処理せず滞留させ、ログに
-// 残すだけに留める（engine が実装されるまで、イベントは失われずキューに残る）。
-func newPlaceholderWorker(logger *slog.Logger, st *store.Store) daemon.Worker {
-	return daemon.WorkerFunc(func(ctx context.Context) (bool, error) {
-		ev, ok, err := st.NextUnprocessedEvent(ctx)
-		if err != nil {
-			return false, fmt.Errorf("check for unprocessed events: %w", err)
-		}
-		if !ok {
-			return false, nil
-		}
-		logger.Warn("found an unprocessed event but internal/engine is not wired yet (Phase 3); leaving it queued",
-			"event_id", ev.ID, "item_id", ev.ItemID, "type", ev.Type)
-		return false, nil
-	})
 }
