@@ -15,13 +15,13 @@ func TestEnsureToDir(t *testing.T) {
 		t.Fatalf("EnsureToDir failed: %v", err)
 	}
 
-	skillFile := filepath.Join(tempDir, "upload-github-image", "SKILL.md")
-	content, err := os.ReadFile(skillFile)
+	readmeFile := filepath.Join(tempDir, "README.md")
+	content, err := os.ReadFile(readmeFile)
 	if err != nil {
-		t.Fatalf("failed to read written skill file: %v", err)
+		t.Fatalf("failed to read written README file: %v", err)
 	}
 
 	if len(content) == 0 {
-		t.Errorf("skill file content is empty")
+		t.Errorf("README file content is empty")
 	}
 }
