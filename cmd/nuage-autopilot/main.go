@@ -28,6 +28,7 @@ import (
 	"autopilot/internal/engine"
 	"autopilot/internal/github"
 	"autopilot/internal/ingest"
+	"autopilot/internal/skills"
 	"autopilot/internal/store"
 )
 
@@ -57,6 +58,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(stdout, nil))
+
+	if err := skills.Ensure(); err != nil {
+		logger.Warn("failed to ensure autopilot skills", "error", err.Error())
+	}
 
 	// secrets.env は手作業で配置する運用のため、起動直後は存在しないことがある。
 	// 常駐プロセスであるため、旧設計（oneshot）のように「警告して正常終了」はしない。
