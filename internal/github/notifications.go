@@ -26,9 +26,12 @@ func (c *Client) GetNotifications(ctx context.Context, since, ifModifiedSince, i
 		path += "&since=" + url.QueryEscape(since)
 	}
 
-	extraHeaders := map[string]string{
-		"If-Modified-Since": ifModifiedSince,
-		"If-None-Match":     ifNoneMatch,
+	extraHeaders := make(map[string]string)
+	if ifModifiedSince != "" {
+		extraHeaders["If-Modified-Since"] = ifModifiedSince
+	}
+	if ifNoneMatch != "" && ifNoneMatch != `W/""` && ifNoneMatch != `""` {
+		extraHeaders["If-None-Match"] = ifNoneMatch
 	}
 
 	status, header, data, err := c.doRequest(ctx, "GET", c.baseURL+path, nil, extraHeaders)
