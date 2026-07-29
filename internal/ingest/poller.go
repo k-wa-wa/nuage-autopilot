@@ -45,11 +45,24 @@ func (p *Poller) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// EnsureSubscriptions は対象リポジトリの一覧について GitHub Notification Subscription (Watch 設定) を 1 回実行する。
+func (p *Poller) EnsureSubscriptions(ctx context.Context) {
+	logger := p.logger()
+	for _, repo := range p.Repos {
+		if err := p.Client.SetRepositorySubscription(ctx, repo, true); err != nil {
+			logger.Warn("failed to ensure repository subscription", "repo", repo, "error", err.Error())
+		} else {
+			logger.Info("ensured repository subscription", "repo", repo)
+		}
+	}
+}
+
 // Poll は internal/daemon.Poller の実装である。
 func (p *Poller) Poll(ctx context.Context) (int, error) {
 	logger := p.logger()
 
 	botLogin, err := p.currentBotLogin(ctx)
+
 	if err != nil {
 		return 0, fmt.Errorf("ingest: resolve current user: %w", err)
 	}

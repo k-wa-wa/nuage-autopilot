@@ -49,3 +49,20 @@ func (c *Client) GetNotifications(ctx context.Context, since, ifModifiedSince, i
 
 	return threads, header.Get("Last-Modified"), header.Get("ETag"), false, nil
 }
+
+// SetRepositorySubscription は指定されたリポジトリに対する Notification Subscription (Watch 設定) を変更する。
+func (c *Client) SetRepositorySubscription(ctx context.Context, repo string, subscribed bool) error {
+	path := fmt.Sprintf("/repos/%s/subscription", repo)
+	body := map[string]bool{"subscribed": subscribed}
+
+	status, _, data, err := c.doRequest(ctx, "PUT", c.baseURL+path, body, nil)
+	if err != nil {
+		return err
+	}
+
+	if status < 200 || status >= 300 {
+		return &APIError{Method: "PUT", Path: path, StatusCode: status, Body: string(data)}
+	}
+
+	return nil
+}

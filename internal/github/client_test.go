@@ -379,6 +379,24 @@ func TestGetNotifications_304DoesNotError(t *testing.T) {
 	}
 }
 
+func TestSetRepositorySubscription(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" {
+			t.Errorf("Method = %q, want PUT", r.Method)
+		}
+		if r.URL.Path != "/repos/k-wa-wa/pechka/subscription" {
+			t.Errorf("Path = %q, want /repos/k-wa-wa/pechka/subscription", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"subscribed": true}`))
+	})
+
+	err := client.SetRepositorySubscription(context.Background(), "k-wa-wa/pechka", true)
+	if err != nil {
+		t.Fatalf("SetRepositorySubscription() error = %v", err)
+	}
+}
+
 func TestCreateLabel(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/repos/k-wa-wa/pechka/labels" {

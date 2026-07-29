@@ -16,6 +16,7 @@ func newTestPoller(t *testing.T, handler http.HandlerFunc, opts ...func(*Poller)
 	t.Helper()
 
 	server := httptest.NewServer(handler)
+
 	t.Cleanup(server.Close)
 
 	client := github.NewClient(github.WithBaseURL(server.URL), github.WithStaticToken("test-token"))
@@ -441,5 +442,40 @@ func TestPollCheckRuns_EnqueuesOnceThenDedupsUntilShaChanges(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("enqueued (2nd) = %d, want 0 (dedup must suppress repeat)", n)
+	}
+}
+
+func TestPoller_EnsureSubscriptions(t *testing.T) {
+	subCalls := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" && r.URL.Path == "/repos/k-wa-wa/pechka/subscription" {
+			subCalls["k-wa-wa/pechka"]++
+			w.WriteHeader(http.StatusOK)
+			writeJSON(w, `{"subscribed": true}`)
+			return
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(server.Close)
+
+	client := github.NewClient(github.WithBaseURL(server.URL), github.WithStaticToken("test-token"))
+	st, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	p := &Poller{
+		Client: client,
+		Store:  st,
+		Repos:  []string{"k-wa-wa/pechka"},
+	}
+
+	ctx := context.Background()
+
+	p.EnsureSubscriptions(ctx)
+
+	if subCalls["k-wa-wa/pechka"] != 1 {
+		t.Fatalf("subCalls = %d, want 1", subCalls["k-wa-wa/pechka"])
 	}
 }

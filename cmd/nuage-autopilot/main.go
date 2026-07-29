@@ -96,6 +96,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		AllowedAuthors: cfg.AllowedAuthors,
 		Logger:         logger,
 	}
+	poller.EnsureSubscriptions(ctx)
+
 	resyncer := &ingest.Resyncer{
 		Client:         client,
 		Store:          st,
