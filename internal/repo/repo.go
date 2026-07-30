@@ -23,10 +23,9 @@ import (
 type Option func(*options)
 
 type options struct {
-	remoteURL         string
-	gitCommand        string
-	ghCommand         string
-	skipUpdateIfExist bool
+	remoteURL  string
+	gitCommand string
+	ghCommand  string
 }
 
 // WithRemoteURL は clone/fetch に使う remote URL を上書きする。
@@ -56,14 +55,6 @@ func WithGHCommand(cmd string) Option {
 		if cmd != "" {
 			o.ghCommand = cmd
 		}
-	}
-}
-
-// WithSkipUpdateIfExist は既に clone 済みのリポジトリが存在する場合に、
-// fetch / checkout / reset などのリモート最新化処理をスキップするかどうかを指定する。
-func WithSkipUpdateIfExist(skip bool) Option {
-	return func(o *options) {
-		o.skipUpdateIfExist = skip
 	}
 }
 
@@ -97,13 +88,6 @@ func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName st
 	}
 
 	localPath := filepath.Join(stateDir, owner, name)
-
-	if isGitRepo(localPath) {
-		if cfg.skipUpdateIfExist {
-			logger.Debug("skipping update for existing clone", "repo", repoName, "path", localPath)
-			return localPath, nil
-		}
-	}
 
 	defaultBranch, err := remoteDefaultBranch(ctx, cfg.gitCommand, cfg.remoteURL)
 	if err != nil {
@@ -146,8 +130,8 @@ func EnsureClone(ctx context.Context, logger *slog.Logger, stateDir, repoName st
 // EnsureWorkspace は allRepos に指定されたすべてのリポジトリを stateDir 配下に
 // clone / 最新化し、同時に主リポジトリ (targetRepo) のローカルパスを返す。
 //
-// 主リポジトリ (targetRepo) は常に最新化を行うが、兄弟リポジトリ (allRepos のうち targetRepo 以外)
-// については、ローカル clone が既に存在する場合は無駄な fetch/reset をスキップする。
+// 主リポジトリおよび兄弟リポジトリのいずれについても、ローカル clone が既に存在する場合は
+// fetch / checkout / reset / clean を行い、常にリモート HEAD の最新状態に同期する。
 func EnsureWorkspace(ctx context.Context, logger *slog.Logger, stateDir, targetRepo string, allRepos []string, opts ...Option) (string, error) {
 	if len(allRepos) == 0 {
 		allRepos = []string{targetRepo}
@@ -155,11 +139,7 @@ func EnsureWorkspace(ctx context.Context, logger *slog.Logger, stateDir, targetR
 
 	var targetPath string
 	for _, r := range allRepos {
-		memberOpts := opts
-		if r != targetRepo {
-			memberOpts = append([]Option{WithSkipUpdateIfExist(true)}, opts...)
-		}
-		p, err := EnsureClone(ctx, logger, stateDir, r, memberOpts...)
+		p, err := EnsureClone(ctx, logger, stateDir, r, opts...)
 		if err != nil {
 			return "", fmt.Errorf("repo: ensure clone for workspace member %s: %w", r, err)
 		}

@@ -177,6 +177,56 @@ func TestEnsureClone_UpdatesExistingCloneAndDiscardsLocalChanges(t *testing.T) {
 	}
 }
 
+func TestEnsureWorkspace_UpdatesAllReposInWorkspace(t *testing.T) {
+	gitBin := requireGit(t)
+	ghPath, _ := writeFakeGH(t)
+	targetRemote := newBareRemote(t, gitBin)
+	peerRemote := newBareRemote(t, gitBin)
+	stateDir := t.TempDir()
+
+	opts := []Option{WithGitCommand(gitBin), WithGHCommand(ghPath)}
+
+	// 初回クローンを作成
+	_, err := EnsureClone(context.Background(), testLogger(), stateDir, "acme/target",
+		append([]Option{WithRemoteURL(targetRemote)}, opts...)...)
+	if err != nil {
+		t.Fatalf("EnsureClone(target) error = %v", err)
+	}
+
+	peerPath, err := EnsureClone(context.Background(), testLogger(), stateDir, "acme/peer",
+		append([]Option{WithRemoteURL(peerRemote)}, opts...)...)
+	if err != nil {
+		t.Fatalf("EnsureClone(peer) error = %v", err)
+	}
+
+	// 兄弟リポジトリ (peerRemote) に新しいコミットを追加
+	peerSeedDirs, _ := filepath.Glob(filepath.Join(filepath.Dir(peerRemote), "seed-work"))
+	if len(peerSeedDirs) != 1 {
+		t.Fatalf("expected exactly one seed-work dir for peer, got %v", peerSeedDirs)
+	}
+	peerSeedDir := peerSeedDirs[0]
+	if err := os.WriteFile(filepath.Join(peerSeedDir, "README.md"), []byte("peer v2\n"), 0o644); err != nil {
+		t.Fatalf("update peer seed file: %v", err)
+	}
+	runOrFatal(t, gitBin, peerSeedDir, "commit", "-q", "-am", "update peer readme")
+	runOrFatal(t, gitBin, peerSeedDir, "push", "-q", "origin", "HEAD")
+
+	// 2回目の EnsureClone 呼び出し（スキップオプションが存在しないため最新化される）
+	_, err = EnsureClone(context.Background(), testLogger(), stateDir, "acme/peer",
+		append([]Option{WithRemoteURL(peerRemote)}, opts...)...)
+	if err != nil {
+		t.Fatalf("EnsureClone(peer 2nd call) error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(peerPath, "README.md"))
+	if err != nil {
+		t.Fatalf("read updated peer README.md: %v", err)
+	}
+	if string(content) != "peer v2\n" {
+		t.Fatalf("peer README.md content = %q, want %q", content, "peer v2\n")
+	}
+}
+
 func currentBranch(t *testing.T, gitBin, dir string) string {
 	t.Helper()
 	cmd := exec.Command(gitBin, "rev-parse", "--abbrev-ref", "HEAD")
