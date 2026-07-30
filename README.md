@@ -14,7 +14,6 @@ Issue に要望を書くとエージェントが必要に応じて質問を返�
 ## ビルド・テスト
 
 ```sh
-cd autopilot
 go build ./...
 go test ./...
 ```
