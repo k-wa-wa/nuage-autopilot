@@ -7,6 +7,14 @@ import (
 	"net/url"
 )
 
+// このファイルはラベル操作の API を提供する。
+//
+// nuage-autopilot 本体はラベルを状態管理に使わない（状態は phase と lease が持つ。
+// DESIGN.md 8.5 節）。ラベルを付け外しするのはエージェントであり、それは gh 経由で
+// 行われるため、以下の関数は現在どこからも呼ばれていない。Go 側がラベルを読む唯一の
+// 用途である agent:ignore の判定は、internal/ingest が Issue/PR の Labels フィールド
+// から直接行う。
+
 // AddLabel は repo の number（Issue/PR 番号）に対して label を付与する。
 // GitHub API はラベル操作を Issue/PR で区別しないため、PR 番号を渡しても動作する。
 // 既に同名のラベルが付いている場合も GitHub 側が冪等に扱うため、

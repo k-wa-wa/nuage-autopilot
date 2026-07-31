@@ -1,15 +1,13 @@
 // Command nuage-autopilot は GitHub Issue/PR を起点にアプリ開発を自動化する
-// nuage-autopilot の実行バイナリである。詳細は autopilot/DESIGN.md を参照。
+// nuage-autopilot の実行バイナリである。詳細は DESIGN.md を参照。
 //
 // 単一の常駐プロセスとして、poll/work/resync/watchdog の 4 goroutine を
 // internal/daemon 上で動かす（DESIGN.md 5章）。状態は SQLite（internal/store）に持ち、
 // プロセス自体は無状態である。
 //
 // Poller/Resyncer は internal/ingest（DESIGN.md 7章）、Worker は internal/engine
-// （DESIGN.md 8章）がそれぞれ実装する。GitHub の変化を events として取り込み、
-// 遷移表に従ってエージェント（claude）を起動するところまでが揃っている
-// （DESIGN.md 18章 Phase 3）。サブ Issue 分割（Phase 4・DESIGN.md 9章）は
-// internal/engine が扱う outcome="split" として同じ Worker に含まれている。
+// （DESIGN.md 8章）がそれぞれ実装する。このファイルの責務は設定の解決と依存の
+// 組み立てだけであり、遷移やイベント取り込みの判断は一切持たない。
 package main
 
 import (

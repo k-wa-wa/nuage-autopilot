@@ -1,7 +1,7 @@
 // Package sdnotify は systemd の sd_notify プロトコル（$NOTIFY_SOCKET への
 // unixgram 送信）を実装する。cgo の libsystemd には依存しない。
 //
-// DESIGN.md 5章「単一プロセスにする理由」を参照。Type=notify + WatchdogSec を使うため、
+// DESIGN.md 5章「ハング検知」を参照。Type=notify + WatchdogSec を使うため、
 // プロセスは起動完了時に READY=1 を、以後は生存を確認できている間だけ WATCHDOG=1 を
 // 送る必要がある。
 package sdnotify

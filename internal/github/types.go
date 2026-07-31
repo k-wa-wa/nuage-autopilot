@@ -10,8 +10,8 @@ type Author struct {
 	// Type は "User" / "Bot" / "Organization" のいずれかである。
 	// GitHub App 経由の投稿は "Bot" になるが、個人の Personal Access Token を
 	// 自動化用アカウントとして使う運用では "User" のままになる点に注意する。
-	// そのため cycle パッケージでは Type だけでなく認証ユーザーの Login とも
-	// 突き合わせて bot 判定を行う。
+	// そのため internal/ingest では Type だけでなく認証ユーザーの Login とも
+	// 突き合わせて bot 判定を行う（DESIGN.md 7.3 節）。
 	Type string `json:"type"`
 }
 
@@ -49,7 +49,7 @@ type rawIssue struct {
 //
 // Body は GET /repos/{repo}/issues の一覧レスポンスに元々含まれている
 // フィールドであり、取得のために追加の API 呼び出しは発生しない
-// （dispatcher に本文を渡す DESIGN.md 8章の要求はこのフィールド経由で満たす）。
+// （エージェントのプロンプトに載せる本文はこのフィールド経由で渡る）。
 type Issue struct {
 	Number    int
 	Title     string

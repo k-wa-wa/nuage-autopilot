@@ -53,7 +53,7 @@ type Config struct {
 	LeaseTTL time.Duration
 
 	// AgentTimeout はエージェント 1 回の実行に許す最大時間である。既定 120 分
-	// （DESIGN.md 5章 レイヤ 1）。
+	// （DESIGN.md 5章「ハング検知」の最内層）。
 	AgentTimeout time.Duration
 
 	// MaxCostUSD / MaxRuns は 1 アイテムあたりの予算上限である
@@ -148,9 +148,9 @@ func (e *Engine) ProcessNext(ctx context.Context) (bool, error) {
 }
 
 // isHumanEventType は ev.Type が人間の行動に由来するイベントかどうかを返す。
-// internal/ingest は commented/reviewed/opened を enqueue する前に既に
-// 自分自身・他 Bot の投稿を除外している（DESIGN.md 7.3 節）ため、ここでの
-// 判定はイベント種別の分類のみでよい。
+// internal/ingest は commented/reviewed を enqueue する前に自分自身・他 Bot の
+// 投稿を除外し、opened については自分自身が起票したものを除外している
+// （DESIGN.md 7.3 節）ため、ここでの判定はイベント種別の分類のみでよい。
 func isHumanEventType(eventType string) bool {
 	switch eventType {
 	case "opened", "commented", "reviewed":

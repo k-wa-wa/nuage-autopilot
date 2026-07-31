@@ -25,7 +25,7 @@ type Poller struct {
 	Repos []string
 
 	// AllowedAuthors は新規アイテムの受け入れを制限する作成者一覧である。
-	// 空の場合は制限しない（DESIGN.md 15章）。
+	// 空の場合は制限しない（DESIGN.md 13章「対象アイテムの選別」）。
 	AllowedAuthors []string
 
 	Logger *slog.Logger

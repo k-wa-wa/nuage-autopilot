@@ -8,7 +8,7 @@
 //     イベントは一切 enqueue しない（着火はしない。DESIGN.md 7.5 節）。
 //     internal/daemon.Resyncer を実装する。
 //
-// 両者に共通する「対象アイテムの選別」（DESIGN.md 15章）と、通知取り込みで
+// 両者に共通する「対象アイテムの選別」（DESIGN.md 13章）と、通知取り込みで
 // 自分自身の投稿を無限ループの引き金にしないためのフィルタ（DESIGN.md 7.3 節）を
 // このファイルに置く。
 package ingest
@@ -22,9 +22,10 @@ import (
 	"autopilot/internal/store"
 )
 
-// IgnoreLabel が付いている Issue/PR は対象から除外する（DESIGN.md 8.5 節・15章）。
-// このチェックは、アイテムを初めて DB に登録する時点でのみ行う（登録後に人間が
-// 付け足した場合は継続監視の対象外にはならない。Phase 2 のスコープ外とする）。
+// IgnoreLabel が付いている Issue/PR は対象から除外する（DESIGN.md 8.5 節・13章）。
+// このチェックは、アイテムを初めて DB に登録する時点でのみ行う。登録後に人間が
+// 付け足しても既存アイテムは監視対象から外れない（現時点では未対応であり、
+// 追跡を止めたい場合は Issue/PR を close する運用とする）。
 const IgnoreLabel = "agent:ignore"
 
 // isAllowedAuthor は author が allowed に含まれるかどうかを判定する。

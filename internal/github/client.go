@@ -1,9 +1,10 @@
 // Package github は GitHub REST API のうち nuage-autopilot が必要とする最小限の操作
-// （Issue/PR 一覧取得・ラベル操作・コメント操作・認証ユーザー取得）を提供する。
+// （notifications のポーリング、Issue/PR の取得、コメント投稿、check-runs の取得、
+// 認証ユーザーの取得、リポジトリの Watch 設定）を提供する。
 //
-// DESIGN.md 5章の方針に従い、標準ライブラリの net/http のみに依存する。
-// go-github 等の外部ライブラリは使わない（追加した場合は vendor/ の生成が必須になり、
-// Phase 2 の時点ではその複雑さに見合う理由がないと判断した）。
+// 標準ライブラリの net/http のみに依存する。go-github 等の外部ライブラリは使わない。
+// 使用するエンドポイントが十数個に限られるのに対し、依存を増やすと vendor/ が
+// 肥大化し、単一バイナリ配布の容易さ（DESIGN.md 4章）を損なうためである。
 package github
 
 import (
@@ -69,7 +70,7 @@ func WithStaticToken(token string) Option {
 // token は Client の生成時に固定しない。リクエストのたびに GH_TOKEN 環境変数を
 // 読み直す（既定の tokenFunc）。環境変数が起動後に設定・更新された場合でも、
 // nuage-autopilot は常駐プロセスであるため、再起動せずに次の呼び出しから
-// 認証が通るようにするためである（DESIGN.md 15章）。
+// 認証が通るようにするためである（DESIGN.md 13章「必須環境変数が未設定のときの挙動」）。
 //
 // GH_TOKEN が空文字列の場合、Authorization ヘッダを付与せずリクエストする
 // （未認証のレート制限が適用される）。

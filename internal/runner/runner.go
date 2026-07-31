@@ -1,6 +1,9 @@
-// Package runner は LLM CLI (claude) をheadlessモードで起動する。
+// Package runner は LLM CLI (claude) を headless モードで起動する。
 //
-// DESIGN.md フェーズ3の決定に従い、使用する CLI は claude のみとする。
+// DESIGN.md 4章の決定に従い、使用する CLI は claude のみとする。
+// 起動モード（DESIGN.md 8.4 節の ModeAgent / ModeVerify）による差は
+// プロンプトの中身だけであり、internal/prompt が吸収する。このパッケージは
+// モードを知らず、Options で渡されたものをそのまま起動する。
 package runner
 
 import (
@@ -19,26 +22,15 @@ import (
 
 const Command = "claude"
 
-// claude 2.1.220 の --help で確認したフラグのうち採用したもの:
+// runArgs はすべての起動に共通して付けるフラグである。
 //
 //	-p, --print                    非対話モードで実行し、応答を出力して終了する
 //	--permission-mode bypassPermissions
 //	                                無人実行のため、パーミッション確認で停止しないようにする
-//	                                （手元で `echo ... | claude -p --permission-mode bypassPermissions`
-//	                                を実際に実行し、確認・停止なく完了することを確認済み）。
 //
-// --output-format は既定では指定しない（既定の "text"）。worker はこの既定のまま使う。
-// --print と組み合わせても、標準出力は色付け等のない素のテキストであることを
-// 手元で確認済みであり、json 形式が持つ cost/duration 等のメタデータよりも、
-// 応答本文をそのまま構造化ログの行として残せる単純さを優先した。
-//
-// 一方、構造化出力が必要な呼び出し元は Options.ExtraArgs で
-// `--output-format json --json-schema <schema>` を追加指定できる。
-// `claude --help` で確認した限り、--json-schema を付けると応答の JSON ラッパの
-// 直下に "structured_output" フィールドとしてスキーマに沿った JSON が渡ってくる。
-// これは "result" フィールド（応答本文の文字列。--json-schema 無指定時は Markdown の
-// コードフェンスで囲まれることがある）よりも厳密で扱いやすいため、dispatcher は
-// structured_output を優先して読む。
+// --output-format はここでは指定しない。何を要求するかは呼び出し元の関心事であり、
+// Options.ExtraArgs で渡す（internal/engine は実測コストとセッション ID を得るため
+// `--output-format json` を指定する。DESIGN.md 8.6 節・10章）。
 var runArgs = []string{"-p", "--permission-mode", "bypassPermissions"}
 
 // Options は Run の入力である。
@@ -48,8 +40,8 @@ type Options struct {
 	Command string
 
 	// WorkDir は claude を起動する作業ディレクトリ（対象リポジトリの clone 先）である。
-	// 必須。dispatcher のように clone を伴わない呼び出しでは StateDir 等、存在する
-	// 任意のディレクトリを指定してよい。
+	// 必須。claude のセッションは作業ディレクトリに紐づくため、--resume を成立させる
+	// には毎回同じパスを渡す必要がある（DESIGN.md 8.6 節）。
 	WorkDir string
 
 	// Prompt は claude に渡す指示文である。コマンドライン引数ではなく標準入力経由で
@@ -60,19 +52,19 @@ type Options struct {
 	Prompt string
 
 	// Model は --model に渡すモデル名。空の場合は --model を付けず claude の既定
-	// モデルを使う（worker はこちら）。dispatcher は判断のみで実装を伴わないため
-	// haiku を明示指定する（DESIGN.md 8章「dispatcher の契約」）。
+	// モデルを使う。internal/engine は既定モデルに任せるためこれを指定しない。
 	Model string
 
 	// ExtraArgs は runArgs の後ろにそのまま追加する追加のコマンドライン引数である。
-	// dispatcher が構造化出力を要求する `--output-format json --json-schema <schema>`
-	// を渡すために用意した。worker は指定しない。
+	// internal/engine が `--output-format json`（実測コストとセッション ID の取得）と
+	// `--resume <session-id>`（セッション継続）を渡すために用意した。
 	ExtraArgs []string
 
 	// ExtraEnv は claude サブプロセスに渡す追加の環境変数（"KEY=VALUE" 形式）である。
 	// buildEnv() が組み立てる環境の後ろに追加するため、同名キーがあれば ExtraEnv が
 	// 勝つ（exec.Cmd.Env は重複キーがある場合、後ろの値が使われる）。
-	// worker が結果を書き出す先を伝える NUAGE_REPORT_FILE を渡すために用意した。
+	// エージェントが結果を書き出す先を伝える NUAGE_REPORT_FILE を渡すために用意した
+	// （機械チャネル。DESIGN.md 8.2 節）。
 	ExtraEnv []string
 
 	// Logger は stdout/stderr を構造化ログとして出力する先。nil の場合 slog.Default()
@@ -92,9 +84,9 @@ type Result struct {
 	Duration time.Duration
 
 	// Stdout は標準出力全体（行を "\n" で連結したもの）である。Logger には行単位で
-	// 既に流しているが、dispatcher は claude の JSON 応答をパースする必要があるため、
-	// この呼び出し元向けに全体もあわせて保持しておく。worker の呼び出し元はこの値を
-	// 使わなくてよい。
+	// 既に流しているが、`--output-format json` を指定した呼び出し元が応答 JSON を
+	// パースできるよう、全体もあわせて保持しておく（internal/engine が session_id と
+	// total_cost_usd を読む）。
 	Stdout string
 }
 
@@ -201,7 +193,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 // 読み取った行をそのまま返す。claude の標準出力/標準エラーのみを扱い、
 // プロンプト（入力）はここを通らない。
 //
-// 戻り値は Result.Stdout の組み立て（dispatcher が claude の JSON 応答をパースする
+// 戻り値は Result.Stdout の組み立て（呼び出し元が claude の JSON 応答をパースする
 // ために必要）に使う。stderr の呼び出し元は戻り値を無視してよい。
 func streamToLog(logger *slog.Logger, stream string, r io.Reader) []string {
 	var lines []string
@@ -222,7 +214,7 @@ func streamToLog(logger *slog.Logger, stream string, r io.Reader) []string {
 //
 // GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL を GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL と
 // 同値にするのは、claude が自律的に実行する `git commit` のコミッター名義を
-// コミット作成者名義と一致させるためである（DESIGN.md 10.5節、実装指示4項）。
+// コミット作成者名義と一致させるためである（DESIGN.md 13章の環境変数）。
 // os.Environ() で継承した値の後に追記することで、後勝ちの exec.Cmd.Env の仕様
 // （重複キーは最後の値が使われる）により確実に上書きされる。
 //

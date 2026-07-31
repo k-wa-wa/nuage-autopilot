@@ -6,8 +6,8 @@
 // internal/ingest の低頻度な全走査（resync）の責務である。
 //
 // SQLite ドライバは pure-Go 実装（github.com/ncruces/go-sqlite3）を使う。cgo が入ると
-// buildGoModule でのビルドと vendorHash=null 運用が破綻するためである
-// （DESIGN.md 6.4 節）。SQLite 本体は WebAssembly にコンパイルされたバイナリとして
+// buildGoModule でのビルドと vendorHash=null 運用が破綻し、単一バイナリ配布の容易さ
+// （DESIGN.md 4章）が失われるためである。SQLite 本体は WebAssembly にコンパイルされたバイナリとして
 // go:embed で組み込まれており（driver/embed サブパッケージ）、ビルド・実行時とも
 // ネットワークアクセスを必要としない。同種の modernc.org/sqlite は GOOS/GOARCH の
 // 組み合わせごとに C→Go 変換済みコードを vendor するため vendor/ が 200MB を超えるが、

@@ -3,9 +3,8 @@
 // DESIGN.md 5章の決定に従い、poll/work/resync/watchdog の 4 goroutine を単一プロセス内で
 // 動かす。状態は SQLite（internal/store）に持たせるため、常駐してもプロセス自体は
 // 無状態のままである。何を poll/process/resync するかはこのパッケージの関心事ではなく、
-// Poller/Worker/Resyncer インターフェース経由で外部から注入する
-// （Phase 1 の時点では internal/ingest・internal/engine がまだ無いため、
-// cmd/nuage-autopilot は何もしない実装を渡し、デーモンが空回りすることを確認する）。
+// Poller/Worker/Resyncer インターフェース経由で外部から注入する（本番では
+// internal/ingest・internal/engine を、テストではフェイクを渡す）。
 package daemon
 
 import (

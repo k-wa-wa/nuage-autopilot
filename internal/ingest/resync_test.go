@@ -210,7 +210,7 @@ func TestResync_UpdatesStaleHeadSHA(t *testing.T) {
 }
 
 // TestResync_ReapsExpiredLeases は resync がリースの期限切れ回収も行うことを検証する
-// （Phase 1 から引き継いだ責務。DESIGN.md 7.5 節）。
+// （DESIGN.md 7.5 節）。
 func TestResync_ReapsExpiredLeases(t *testing.T) {
 	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
 	r, st := newTestResyncer(t, func(w http.ResponseWriter, req *http.Request) {

@@ -1,10 +1,11 @@
 // Package repo は対象アプリケーションリポジトリのローカル clone / 更新を行う。
 //
-// DESIGN.md 7章「対象リポジトリの git clone は実行時に stateDir 配下で行う」を実装する。
-// 実装指示4項の要件は次の通りである。
+// DESIGN.md 12章「対象リポジトリの git clone は実行時に stateDir 配下で行う」を
+// 実装する。満たすべき要件は次の通りである。
 //   - NUAGE_STATE_DIR（既定 ./state）配下にリポジトリごとのディレクトリを作る
-//   - 未 clone なら clone、既にあれば fetch して最新化する
+//   - 未 clone なら clone、既にあれば fetch して既定ブランチの最新に戻す
 //   - 認証は GH_TOKEN を用いるが、トークンをログや git の remote URL に残さない
+//   - PR のチェックアウトはここでは行わない（エージェントの責務である）
 package repo
 
 import (

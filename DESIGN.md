@@ -94,26 +94,47 @@ Go が決めるのは **「起こすか否か」だけ**とする。何をする
 
 単一バイナリの常駐プロセス 1 つで構成し、内部を 4 つの goroutine に分ける。
 
+```mermaid
+flowchart TB
+  subgraph PROC["nuage-autopilot（単一プロセス）"]
+    direction LR
+    POLLER["<b>poller</b><br/>1 分ごと<br/>GitHub の変化を<br/>events に取り込む"]
+    WORKER["<b>worker</b><br/>通知 or 1 分ごと<br/>イベントを 1 件処理し<br/>claude を起動する"]
+    RESYNCER["<b>resyncer</b><br/>1 時間ごと<br/>全 open を走査し<br/>items を修復する"]
+    WATCHDOG["<b>watchdog</b><br/>30 秒ごと<br/>他 3 つの生存を確認し<br/>WATCHDOG=1 を送る"]
+  end
+  DB[("SQLite<br/>items / events / leases / cursors")]
+
+  POLLER -->|enqueue| DB
+  WORKER <-->|取り出し / 更新| DB
+  RESYNCER -->|修復| DB
+  WATCHDOG -.-> POLLER
+  WATCHDOG -.-> WORKER
+  WATCHDOG -.-> RESYNCER
 ```
-                      nuage-autopilot （単一プロセス）
-  ┌──────────────────────────────────────────────────────────┐
-  │                                                          │
-GitHub ──→ [poller]      1 分ごと。notifications を取り込む   │
-  │           │                                              │
-  │           ├─ events に enqueue ─→ SQLite ←──────┐        │
-  │           └─ chan で通知 ─┐                     │        │
-  │                           ▼                     │        │
-  │         [worker]  通知 or 1 分ごと。1 件処理     │        │
-  │           │                                     │        │
-  │           ▼                                     │        │
-  │         claude （1 アイテム = 1 セッション）      │        │
-  │           ├─→ gh でコメント・Issue 起票・PR 作成 （人間チャネル）
-  │           └─→ NUAGE_REPORT_FILE に outcome      （機械チャネル）
-  │                                                 │        │
-  │         [resyncer] 1 時間ごと。全走査して修復 ───┘        │
-  │                                                          │
-  │         [watchdog] 30 秒ごとに sd_notify WATCHDOG=1       │
-  └──────────────────────────────────────────────────────────┘
+
+4 つのループは互いに直接呼び合わない。唯一の結合点は SQLite と、poller が worker を
+起こすためのチャネル 1 本だけである。1 件のイベントは次のように流れる。
+
+```mermaid
+sequenceDiagram
+  participant GH as GitHub
+  participant P as poller
+  participant DB as SQLite
+  participant W as worker
+  participant CL as claude
+
+  loop 1 分ごと
+    P->>GH: GET /notifications（条件付き）
+    GH-->>P: 304（変化なし）または更新されたスレッド
+    P->>DB: 新着コメント等を events に enqueue
+    P-)W: chan で起こす
+  end
+  W->>DB: 未処理イベントを 1 件取り出し lease を取得
+  W->>CL: プロンプトを渡して起動（1 アイテム = 1 セッション）
+  CL->>GH: gh でコメント・Issue 起票・PR 作成【人間チャネル】
+  CL-->>W: NUAGE_REPORT_FILE に outcome【機械チャネル】
+  W->>DB: phase を更新し lease を解放
 ```
 
 **単一プロセスにする理由**は 3 つある。
@@ -138,6 +159,7 @@ worker が 30 分かかっている間も poller と resyncer は動き続ける
 
 lease は TTL を持つため、解放できずに終了しても最終的には回収される。
 明示的な解放は「再起動後すぐに再開できる」ようにするための最適化にすぎない。
+中断された作業は phase がそのまま残っているため、次のイベントで自然に再開する。
 
 ## 6. 状態モデル
 
@@ -162,6 +184,34 @@ lease は TTL を持つため、解放できずに終了しても最終的には
 | `delegated` | サブ Issue に分割済み | 子の完了 |
 | `done` | close / merge 済み | — |
 
+```mermaid
+stateDiagram-v2
+  [*] --> new: 初めて認識した
+  new --> awaiting_answer: asked
+  new --> delegated: split
+  new --> in_review: implemented
+  awaiting_answer --> in_review: 人間が回答
+  delegated --> in_review: 全子完了
+  in_review --> awaiting_answer: asked
+  in_review --> blocked: blocked
+  blocked --> in_review: 人間がコメント
+  in_review --> ready: ci_success
+  ready --> in_review: 人間の追加 push で ci_failure
+  ready --> done: 人間がマージ
+
+  note right of done
+    close / merge されれば
+    どの phase からでも done になる
+  end note
+```
+
+矢印のラベルのうち `asked` / `implemented` / `split` / `blocked` はエージェントが返す
+outcome（8.3 節）、`ci_success` / `ci_failure` は CI の結果である。
+予算上限に達した場合も `blocked` へ落ちる（10章）。
+
+`awaiting_answer` と `blocked` からの離脱は、いずれも**人間のコメント**が起点である。
+人間がコメントすると、エージェントが resume され、その結果の outcome に応じて次の phase が決まる。
+
 **`awaiting_answer` がラベルではなく phase であることが、ストーリー 2 → 3 を成立させる。**
 人間が issue に回答すれば、そのコメントがイベントになり、そのまま次に進む。
 人間が剥がすべきラベルは存在しない。
@@ -179,14 +229,19 @@ lease は TTL を持つため、解放できずに終了しても最終的には
 
 ### 7.1 source は差し替え可能にする
 
-```
-[notifications poller] ─┐
-[webhook receiver]     ─┼──→  events テーブル  ──→  以降は共通
-[resync sweeper]       ─┘
+```mermaid
+flowchart LR
+  A["notifications poller<br/>（現行）"] --> EV
+  B["webhook receiver<br/>（将来の追加候補）"] --> EV
+  C["engine<br/>（child_done・9章）"] --> EV
+  EV[("events テーブル")] --> D["phase 遷移・lease・エージェント起動<br/>（以降は共通）"]
 ```
 
 イベントの正規化さえ揃えれば、取り込み手段を追加・変更・併走させても下流
 （phase 遷移・lease・エージェント起動）は一切変わらない。
+
+resync（7.5 節）はこの図には現れない。resync は `items` を GitHub の現状に合わせて
+修復する役であり、**イベントを積む source ではない**（着火しないため。7.6 節）。
 
 ### 7.2 notifications ポーリングの手順
 
@@ -206,6 +261,10 @@ lease は TTL を持つため、解放できずに終了しても最終的には
 スレッドを既読にする `PATCH` は行わない（書き込みリクエストを増やさないため）。
 `since` パラメータとアイテムごとの `last_seen_at` を watermark として使い、
 重複は `dedup_key` が吸収する。
+
+`/notifications` は Watch していないリポジトリの通知を返さない。そのため起動時に 1 回だけ、
+対象リポジトリの subscription（Watch 設定）を有効化する。失敗しても警告ログを出すのみで
+起動は継続する（既に Watch 済みであることが大半のため）。
 
 ### 7.3 自分のコメントで自分を起こしてはならない
 
@@ -308,9 +367,11 @@ phase を進めるための最小情報だけである。
 
 `summary` フィールドは持たない。人間向けの文章は既に GitHub に投稿されているためである。
 
-**Go が GitHub に書き込むのは失敗経路だけである。** エージェントが何も投稿せず report も
-残さずに終了した場合に限り、Go が短い定型文を投稿して `blocked` にする。
-これは無言終了に対する唯一の保険であり、通常運転では Go は何も書き込まない。
+**Go が GitHub に書き込むのは失敗経路だけである。** 書き込むのは次の 2 つの場合に限られ、
+いずれも短い定型文を投稿して `blocked` にする。通常運転では Go は何も書き込まない。
+
+- エージェントを起動できなかった、または有効な report を残さずに終了した（無言終了への保険）
+- 予算上限に達したため起動しなかった（10章）
 
 結果として、blocked の説明文は「実際に作業したエージェントが書いたもの」になり、原因や状態を的確に把握できる。
 
@@ -318,7 +379,7 @@ phase を進めるための最小情報だけである。
 
 現行ではエージェントの自己レビュー（実装・テスト・自己レビュー・PR作成を一括実行）で完結させるが、将来的な別セッションによる第三者レビュー（`verify`）の追加に備えて以下のインターフェース枠を保持する。
 
-1. **実行モードの区別**: `internal/runner` および `internal/prompt` に `ModeAgent` / `ModeVerify` の区別を持たせる（現在は `agent` のみ実装）。
+1. **実行モードの区別**: `internal/prompt` に `Mode` 型（`ModeAgent` / 将来の `ModeVerify`）を持たせる。現在実装しているのは `ModeAgent` のみである。モードによる差はプロンプトの中身だけであるため、`internal/runner` はモードを知らない汎用の CLI 起動役に留める。
 2. **`ready` phase の独立**: `in_review` + `ci_success` から `ready` へ遷移する構造を保ち、将来 verify を差し込める設計とする。
 
 ### 8.5 何を解放し、何を締めるか
@@ -396,8 +457,9 @@ resume する。親は統合・クローズ・追加分割のいずれかを判�
 ## 11. リースによる排他
 
 エージェントを起動する前に `leases` に行を挿入する（`item_id` が PRIMARY KEY なので
-二重取得は SQLite が防ぐ）。`expires_at` はエージェント 1 回の実行タイムアウト
-（既定 120 分。12 節）より長く取る。
+二重取得は SQLite が防ぐ）。`expires_at` はエージェント 1 回の実行タイムアウトより長く取る
+（既定はタイムアウト 120 分に対し TTL 130 分）。lease だけが先に切れて二重起動になることを
+防ぐためである。
 
 - 正常終了時に削除する
 - クラッシュ時は期限切れによって自動的に回収される
@@ -415,53 +477,43 @@ resume する。親は統合・クローズ・追加分割のいずれかを判�
 | watchdog | 30 秒ごと | 他 3 つの生存を確認し `sd_notify` する | 即時 |
 
 いずれも `time.Ticker` と `select` による単純なループとし、`ctx.Done()` で停止する。
-間隔は環境変数で上書きできるようにする（開発時に短縮するため）。
+間隔・ハング判定の閾値は `daemon.Config` のフィールドとして注入可能にしてある
+（既定値は上表の通り。テストではここを短縮する）。
 
-worker は 1 回の起床で**イベントを 1 件だけ**処理する。並行実行は行わない
-（clone を共有するためワーキングツリーが衝突する）。並行化が必要になった場合は
-`git worktree` によるアイテムごとの作業ツリー分離に移行する。
+worker は 1 回の `ProcessNext` で**イベントを 1 件だけ**処理する。ただし処理できた
+場合は次の起床を待たずに続けて次の 1 件を試し、バックログがポーリング間隔で
+律速されないようにする。並行実行は行わない（clone を共有するためワーキングツリーが
+衝突する）。並行化が必要になった場合は `git worktree` によるアイテムごとの
+作業ツリー分離に移行する。
 
 `items` / `events` の更新は SQLite の WAL モードで行い、`busy_timeout` を設定する。
 単一プロセス内なので `*sql.DB` を 1 つ共有すれば Go のコネクションプールが直列化する。
 
-対象リポジトリの `git clone` は実行時に `stateDir` 配下で行う。Go は clone を
+対象リポジトリの `git clone` は実行時に `stateDir/<owner>/<name>` へ行う。Go は clone を
 既定ブランチの最新状態に戻すところまでを担い、PR のチェックアウトはエージェントに任せる。
 
-## 13. ディレクトリ構成
+エージェント起動時には、対象リポジトリだけでなく `--repos` に挙げた**全リポジトリ**を
+clone / 最新化する。これにより作業ディレクトリの兄弟ディレクトリに関連リポジトリが揃い、
+エージェントが横断的な影響を確認できる（変更自体は各リポジトリの別 PR として起票させる）。
 
-```
-nuage-autopilot/
-├── DESIGN.md                   # 本ファイル
-├── README.md
-├── env.example                 # 環境変数設定のテンプレート
-├── flake.nix                   # Nix パッケージ定義
-├── go.mod / vendor/
-├── cmd/
-│   └── nuage-autopilot/
-│       └── main.go             # エントリポイント
-└── internal/
-    ├── config/                 # フラグ・環境変数の解決
-    ├── store/                  # SQLite。items / events / leases / cursors
-    ├── github/                 # Issue / PR / notifications / check-runs (net/http)
-    ├── ingest/                 # notifications ポーラー、resync、イベント正規化
-    ├── engine/                 # 遷移表、lease、予算
-    ├── prompt/                 # エージェントプロンプト作成
-    ├── repo/                   # 対象リポジトリの clone / 更新
-    ├── runner/                 # claude の起動、セッション管理
-    └── daemon/                 # goroutine のループ管理と graceful shutdown
-```
+## 13. 設定と環境変数
 
-## 14. 設定と環境変数
+シークレットおよび動作設定は、すべて環境変数および CLI コマンドライン引数経由で渡す。
 
-シークレットおよび動作設定は、すべて環境変数および CLI コマンドライン引数（`--repos`）経由で渡す。
+| フラグ | 必須/任意 | 用途 |
+| :-- | :-- | :-- |
+| `--repos` | 必須 | 対象リポジトリのカンマ区切りリスト（`owner/name` 形式） |
+| `--allowed-authors` | 任意 | 対象とする Issue/PR 作成者のカンマ区切りリスト。未指定時は `NUAGE_ALLOWED_AUTHORS`、それも無ければ既定値 |
+| `--version` | 任意 | バージョンを表示して終了する |
 
 | 変数 | 必須/任意 | 用途 |
 | :-- | :-- | :-- |
 | `GH_TOKEN` | 必須 | gh CLI / GitHub API / git push の認証用 Personal Access Token |
 | `GIT_AUTHOR_NAME` | 必須 | 生成コミットの Author / Committer 名 |
 | `GIT_AUTHOR_EMAIL` | 必須 | 生成コミットの Author / Committer メールアドレス |
-| `NUAGE_ALLOWED_AUTHORS` | 任意 | 対象とする Issue/PR の作成者のカンマ区切りリスト（空の場合は全ユーザー対象） |
+| `NUAGE_ALLOWED_AUTHORS` | 任意 | `--allowed-authors` の既定値。両方とも未指定の場合は組み込みの既定値が使われ、**全ユーザー対象にはならない** |
 | `NUAGE_STATE_DIR` | 任意 | SQLite データベースや作業用クローンを置くディレクトリ（既定: `./state`） |
+| `NUAGE_GITHUB_API_BASE_URL` | 任意 | GitHub API のベース URL の差し替え。結合テストや GitHub Enterprise 用の内部フックであり、通常運用では未設定でよい |
 
 ### 必須環境変数が未設定のときの挙動
 
@@ -476,5 +528,7 @@ GitHub API 通信時に環境変数を動的に読み出すため、起動後に
 ### 対象アイテムの選別
 
 - **オプトアウト方式**とする。`agent:ignore` ラベルが付いていない open な Issue/PR が対象。
-- `NUAGE_ALLOWED_AUTHORS` に該当しない作成者のアイテムは対象外とする。
+- 許可作成者リストに該当しない作成者のアイテムは対象外とする（リストが空の場合のみ全員が対象）。
+- どちらの判定も**アイテムを初めて DB に登録する時点**で行う。登録後にラベルを付けても
+  追跡は止まらない。追跡を止めたい場合は Issue/PR を close する。
 - 初回認識時は着火しない（7.6 節）。

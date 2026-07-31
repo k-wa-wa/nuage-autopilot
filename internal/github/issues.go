@@ -9,8 +9,8 @@ import (
 //
 // TODO: 現状は先頭 1 ページ（最大 100 件）のみを取得する。対象リポジトリの
 // open な Issue/PR がこれを超える運用になった場合はページネーション
-// （Link ヘッダの追跡）の実装が必要になる。Phase 2 の時点では対象リポジトリ
-// （pechka 等）の open 件数がそこまで多くない前提で単純化した。
+// （Link ヘッダの追跡）の実装が必要になる。個人開発向けの想定であり、
+// 同時に 100 件を超える open アイテムを抱えない前提で単純化した。
 const listPerPage = 100
 
 // ListOpenIssues は repo（"owner/name" 形式）の open な Issue 一覧を取得する。

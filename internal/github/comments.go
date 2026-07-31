@@ -27,12 +27,15 @@ func lastPageURL(h http.Header) (string, bool) {
 }
 
 // ListComments は repo の number（Issue/PR 番号）に付いたコメントを一覧取得する。
-// isPR が true の場合は、Issue の会話コメントに加えて PR レビューコメント（GET /pulls/{n}/reviews）も
-// 取得・統合し、時系列順（昇順）にソートして返す。
+// isPR が true の場合は、Issue の会話コメントに加えて PR レビュー（GET /pulls/{n}/reviews）と
+// 差分行コメント（GET /pulls/{n}/comments）も取得・統合し、時系列順（昇順）にソートして返す。
 //
 // コメントが 100 件（1 ページ）を超える場合、Link ヘッダの rel="last" を辿って
-// 最新のページを追加で取得する。イベント取り込み・予算判定はいずれも「直近の
-// コメント」を見て判断するため、古いページだけでは最新の状態を見誤る。
+// 最終ページを取得し、先頭ページの代わりに採用する。呼び出し元が必要とするのは
+// 常に直近のコメントであり、先頭ページだけでは最新の状態を見誤るためである。
+//
+// 現在の常駐プロセスはこの関数を呼ばない（イベント取り込みは差分のみを見る
+// ListCommentsSince を使う）。全履歴が必要になった場合のために残している。
 func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR bool) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d", repo, number, listPerPage)
 
@@ -65,8 +68,8 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR
 				}
 			}
 		} else {
-			// レビュー取得の失敗は、レビュー結果が観測できなくなり dispatcher の判断ミスにつながるため
-			// 404 以外のエラーは無視せず呼び出し元へ報告する。
+			// レビュー取得の失敗を握りつぶすと「レビューが無かった」ことと区別できず、
+			// 人間の FB を取りこぼす。404 以外のエラーは呼び出し元へ報告する。
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
 				return nil, fmt.Errorf("list reviews for %s#%d: %w", repo, number, err)
