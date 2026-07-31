@@ -15,9 +15,8 @@ import (
 // なく「今は他が処理中」という通常の結果である）。
 //
 // SQLite の UPSERT に WHERE 句を付けることで、この判定と更新を 1 ステートメントの
-// アトミックな操作として行う。旧設計が自動回収を諦めた理由（「他プロセスが起動して
-// いる可能性を Go 側から判別できない」）は、holder と expires_at を持つこの方式で
-// 解消される（DESIGN.md 11章）。
+// アトミックな操作として行う。holder と expires_at を保持することで、プロセスが
+// クラッシュした場合でも期限切れによって安全に自動回収できる（DESIGN.md 11章）。
 func (s *Store) AcquireLease(ctx context.Context, itemID int64, holder string, ttl time.Duration) (acquired bool, err error) {
 	now := s.now()
 	expiresAt := formatTime(now.Add(ttl))

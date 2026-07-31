@@ -42,8 +42,7 @@ func TestRun_MissingRepo(t *testing.T) {
 // SIGTERM を受けて正常終了することを確認する。
 //
 // run() は内部で signal.NotifyContext(os.Interrupt, syscall.SIGTERM) を使って
-// 常駐する（Phase 1 以降の設計。oneshot だった旧実装と異なり、1 サイクルで
-// 戻ってくることはない）。テストプロセス自身に SIGTERM を送ることで終了させる。
+// 常駐する。テストプロセス自身に SIGTERM を送ることで終了させる。
 func TestRun_StartsDaemonAndStopsOnSIGTERM(t *testing.T) {
 	// このテストは実際の GitHub API には一切到達しない。Poller/Resyncer
 	// （internal/ingest）は daemon 起動直後に即座に 1 回呼ばれるため

@@ -1,7 +1,6 @@
 // Package runner は LLM CLI (claude) をheadlessモードで起動する。
 //
-// DESIGN.md フェーズ3の決定に従い、使用する CLI は claude のみである（旧 nuage-agent の
-// agy/Antigravity は使わない）。
+// DESIGN.md フェーズ3の決定に従い、使用する CLI は claude のみとする。
 package runner
 
 import (

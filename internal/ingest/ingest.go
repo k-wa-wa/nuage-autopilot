@@ -56,7 +56,7 @@ func hasIgnoreLabel(labels []string) bool {
 //
 // botLogin との一致に加えて type == "Bot" も見るのは、GitHub Actions bot や
 // dependabot など、他の自動化による投稿も人間の意図ではないため同様に無視すべき
-// だからである（旧設計の isHumanComment と同じ考え方）。
+// だからである。
 func isSelfOrBot(c github.Comment, botLogin string) bool {
 	return c.User.Login == botLogin || c.User.Type == "Bot"
 }

@@ -64,7 +64,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// secrets.env は手作業で配置する運用のため、起動直後は存在しないことがある。
-	// 常駐プロセスであるため、旧設計（oneshot）のように「警告して正常終了」はしない。
+	// 常駐プロセスであるため、環境変数が未設定の場合でも警告を出力して起動を継続する。
 	// GitHub を必要としないループは動き続け、GitHub API を呼ぶ段になって初めて
 	// エラーとしてログに現れる（DESIGN.md 15章）。
 	if missing := config.MissingEnv(); len(missing) > 0 {
