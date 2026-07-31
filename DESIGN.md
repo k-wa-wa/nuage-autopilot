@@ -514,6 +514,7 @@ clone / 最新化する。これにより作業ディレクトリの兄弟ディ
 | `NUAGE_ALLOWED_AUTHORS` | 任意 | `--allowed-authors` の既定値。両方とも未指定の場合は組み込みの既定値が使われ、**全ユーザー対象にはならない** |
 | `NUAGE_STATE_DIR` | 任意 | SQLite データベースや作業用クローンを置くディレクトリ（既定: `./state`） |
 | `NUAGE_GITHUB_API_BASE_URL` | 任意 | GitHub API のベース URL の差し替え。結合テストや GitHub Enterprise 用の内部フックであり、通常運用では未設定でよい |
+| `KUBECONFIG` | 任意 | エージェント（claude）がクラスタ調査用のkubectlを使うためのkubeconfigパス。nuage-autopilot自体はこの変数を参照しない。`internal/runner` の `buildEnv()` が `os.Environ()` を継承する実装のため、ホスト側（autopilot-server の systemd unit）で設定しておけばclaudeサブプロセスにそのまま伝播する。read-onlyスコープのkubeconfig発行・配置は nuage-cluster 側で行う（k-wa-wa/nuage-workspace#8） |
 
 ### 必須環境変数が未設定のときの挙動
 
