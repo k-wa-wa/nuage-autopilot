@@ -54,7 +54,7 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR
 		comments = append(comments, r.toComment())
 	}
 
-	// PR の場合のみレビューコメントを取得する。
+	// PR の場合のみレビューコメント（要約およびインラインコメント）を取得する。
 	if isPR {
 		reviewsPath := fmt.Sprintf("/repos/%s/pulls/%d/reviews?per_page=%d", repo, number, listPerPage)
 		var rawReviews []rawReview
@@ -72,6 +72,19 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR
 				return nil, fmt.Errorf("list reviews for %s#%d: %w", repo, number, err)
 			}
 		}
+
+		pullCommentsPath := fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=%d", repo, number, listPerPage)
+		var rawPullComments []rawComment
+		if err := c.request(ctx, "GET", pullCommentsPath, nil, &rawPullComments); err == nil {
+			for _, r := range rawPullComments {
+				comments = append(comments, r.toComment())
+			}
+		} else {
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
+				return nil, fmt.Errorf("list pull comments for %s#%d: %w", repo, number, err)
+			}
+		}
 	}
 
 	sort.Slice(comments, func(i, j int) bool {
@@ -82,7 +95,7 @@ func (c *Client) ListComments(ctx context.Context, repo string, number int, isPR
 }
 
 // ListCommentsSince は repo の number（Issue/PR 番号）について、since より新しい
-// 会話コメント（および isPR の場合は PR レビュー）を取得する。
+// 会話コメント（および isPR の場合は PR レビュー・インラインコメント）を取得する。
 //
 // ListComments と異なり、全履歴ではなく差分のみを対象とする（internal/ingest が
 // 1 分間隔のポーリングごとに「前回確認した時刻以降の新着」だけを取り出すために使う。
@@ -120,6 +133,22 @@ func (c *Client) ListCommentsSince(ctx context.Context, repo string, number int,
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
 				return nil, fmt.Errorf("list reviews for %s#%d: %w", repo, number, err)
+			}
+		}
+
+		pullCommentsPath := fmt.Sprintf("/repos/%s/pulls/%d/comments?since=%s&per_page=%d",
+			repo, number, since.UTC().Format(time.RFC3339), listPerPage)
+		var rawPullComments []rawComment
+		if err := c.request(ctx, "GET", pullCommentsPath, nil, &rawPullComments); err == nil {
+			for _, r := range rawPullComments {
+				if r.CreatedAt.After(since) {
+					comments = append(comments, r.toComment())
+				}
+			}
+		} else {
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 404 {
+				return nil, fmt.Errorf("list pull comments since %s for %s#%d: %w", since, repo, number, err)
 			}
 		}
 	}

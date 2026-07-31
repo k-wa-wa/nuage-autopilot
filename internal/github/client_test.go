@@ -181,7 +181,7 @@ func TestListComments(t *testing.T) {
 		switch r.URL.Path {
 		case "/repos/k-wa-wa/pechka/issues/3/comments":
 			_, _ = w.Write([]byte(`[{"id": 100, "body": "looks good", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
-		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews", "/repos/k-wa-wa/pechka/pulls/3/comments":
 			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -209,7 +209,7 @@ func TestListComments_FollowsLinkHeaderToLastPage(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id": 1, "body": "oldest (page 1)", "user": {"login": "alice", "type": "User"}, "created_at": "2026-01-01T00:00:00Z"}]`))
 		case r.URL.Path == "/repos/k-wa-wa/pechka/issues/3/comments" && r.URL.RawQuery == "per_page=100&page=2":
 			_, _ = w.Write([]byte(`[{"id": 2, "body": "newest (page 2)", "user": {"login": "bob", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
-		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/3/reviews":
+		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/3/reviews", r.URL.Path == "/repos/k-wa-wa/pechka/pulls/3/comments":
 			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected request: %s", r.URL.String())
@@ -224,8 +224,8 @@ func TestListComments_FollowsLinkHeaderToLastPage(t *testing.T) {
 	if len(comments) != 1 || comments[0].Body != "newest (page 2)" {
 		t.Fatalf("comments = %+v, want only the last page's comment", comments)
 	}
-	if len(requestedURLs) != 3 {
-		t.Fatalf("requestedURLs = %v, want exactly 3 requests (comments page 1, comments last page, reviews)", requestedURLs)
+	if len(requestedURLs) != 4 {
+		t.Fatalf("requestedURLs = %v, want exactly 4 requests (comments page 1, comments last page, reviews, pull comments)", requestedURLs)
 	}
 }
 
@@ -235,7 +235,7 @@ func TestListComments_NoLinkHeaderUsesSinglePageAsIs(t *testing.T) {
 		case "/repos/k-wa-wa/pechka/issues/3/comments":
 			// Link ヘッダを付けない（1 ページに収まる場合の挙動）。
 			_, _ = w.Write([]byte(`[{"id": 1, "body": "only comment", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
-		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews", "/repos/k-wa-wa/pechka/pulls/3/comments":
 			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -258,6 +258,8 @@ func TestListComments_IncludesReviews(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id": 100, "body": "first comment", "user": {"login": "alice", "type": "User"}, "created_at": "2026-07-01T00:00:00Z"}]`))
 		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
 			_, _ = w.Write([]byte(`[{"id": 101, "body": "[Review Result: PASSED]", "user": {"login": "reviewer", "type": "User"}, "submitted_at": "2026-07-01T01:00:00Z"}]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/comments":
+			http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -289,6 +291,8 @@ func TestListCommentsSince_FiltersReviewsClientSideAndSetsKind(t *testing.T) {
 				{"id": 10, "body": "old review", "user": {"login": "bob", "type": "User"}, "submitted_at": "2026-06-01T00:00:00Z"},
 				{"id": 11, "body": "new review", "user": {"login": "bob", "type": "User"}, "submitted_at": "2026-07-03T00:00:00Z"}
 			]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/comments":
+			_, _ = w.Write([]byte(`[]`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -310,6 +314,35 @@ func TestListCommentsSince_FiltersReviewsClientSideAndSetsKind(t *testing.T) {
 	}
 	if comments[1].Kind != CommentKindReview || comments[1].Body != "new review" {
 		t.Fatalf("comments[1] = %+v, want kind=review body=%q", comments[1], "new review")
+	}
+}
+
+func TestListCommentsSince_IncludesPullComments(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/k-wa-wa/pechka/issues/3/comments":
+			_, _ = w.Write([]byte(`[]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/reviews":
+			_, _ = w.Write([]byte(`[]`))
+		case "/repos/k-wa-wa/pechka/pulls/3/comments":
+			_, _ = w.Write([]byte(`[
+				{"id": 201, "body": "inline review comment", "user": {"login": "charlie", "type": "User"}, "created_at": "2026-07-02T12:00:00Z"}
+			]`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	})
+
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	comments, err := client.ListCommentsSince(context.Background(), "k-wa-wa/pechka", 3, since, true)
+	if err != nil {
+		t.Fatalf("ListCommentsSince() error = %v", err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("len(comments) = %d, want 1", len(comments))
+	}
+	if comments[0].ID != 201 || comments[0].Body != "inline review comment" {
+		t.Fatalf("comments[0] = %+v, want ID 201 inline comment", comments[0])
 	}
 }
 
