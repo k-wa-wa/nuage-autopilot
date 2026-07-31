@@ -63,14 +63,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		logger.Warn("failed to ensure autopilot skills", "error", err.Error())
 	}
 
-	// secrets.env は手作業で配置する運用のため、起動直後は存在しないことがある。
-	// 常駐プロセスであるため、環境変数が未設定の場合でも警告を出力して起動を継続する。
-	// GitHub を必要としないループは動き続け、GitHub API を呼ぶ段になって初めて
-	// エラーとしてログに現れる（DESIGN.md 15章）。
+	// 環境変数は起動後に設定・更新される場合もあるため、未設定時も警告を出力して起動を継続する。
+	// GitHub API 呼び出し時に環境変数を直接読み出すことで、動的な環境変数設定に対応する。
 	if missing := config.MissingEnv(); len(missing) > 0 {
 		logger.Warn("required environment variables are not set; GitHub-dependent operations will fail until they are configured",
 			"missing", missing,
-			"hint", "/var/lib/nuage-autopilot/secrets.env に値を配置する",
 		)
 	}
 

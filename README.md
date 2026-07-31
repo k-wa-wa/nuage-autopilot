@@ -9,7 +9,7 @@ Issue に要望を書くとエージェントが必要に応じて質問を返�
 - `cmd/nuage-autopilot`: 実行バイナリのエントリポイント。poll/work/resync/watchdog の 4 goroutine を常駐させる単一プロセス。
 - `internal/`: 各サブシステムの実装（`github` / `ingest` / `store` / `engine` / `runner` / `daemon` / `config` / `prompt` など）。
 - `flake.nix`: Nix パッケージ定義（`nuage-autopilot` パッケージをビルド）。
-- `secrets.env.example`: 実行に必要なシークレットのテンプレート。実際の値はコミットせず、配置手順に従って対象ホストへ手作業で置く。
+- `env.example`: 実行に必要な環境変数・シークレットの定義テンプレート。
 
 ## ビルド・テスト
 
@@ -21,5 +21,5 @@ go test ./...
 Nix でパッケージをビルドする場合は次を実行する。
 
 ```sh
-nix build ./autopilot#nuage-autopilot
+nix build .#nuage-autopilot
 ```

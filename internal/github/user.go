@@ -7,7 +7,7 @@ import "context"
 // nuage-autopilot 自身が投稿したコメントを判定する際、GitHub App のような
 // 「投稿者の type が Bot になる」仕組みに頼らず、認証ユーザーの Login と
 // 一致するかどうかで判定する。専用の Personal Access Token アカウント
-// （例: secrets.env.example の GIT_AUTHOR_NAME=nuage-autopilot）を使う運用では
+// （例: GIT_AUTHOR_NAME=nuage-autopilot）を使う運用では
 // 投稿者の type は "User" のままになるため、type だけでは bot 判定できないからである。
 func (c *Client) CurrentUser(ctx context.Context) (string, error) {
 	var user struct {

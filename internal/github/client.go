@@ -67,7 +67,7 @@ func WithStaticToken(token string) Option {
 // NewClient は Client を生成する。
 //
 // token は Client の生成時に固定しない。リクエストのたびに GH_TOKEN 環境変数を
-// 読み直す（既定の tokenFunc）。secrets.env が起動後に配置された場合でも、
+// 読み直す（既定の tokenFunc）。環境変数が起動後に設定・更新された場合でも、
 // nuage-autopilot は常駐プロセスであるため、再起動せずに次の呼び出しから
 // 認証が通るようにするためである（DESIGN.md 15章）。
 //

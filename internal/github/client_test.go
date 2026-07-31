@@ -495,7 +495,7 @@ func TestNewClient_ReReadsGHTokenEnvOnEveryRequest(t *testing.T) {
 		t.Fatalf("CurrentUser() error = %v", err)
 	}
 
-	// secrets.env が起動後に配置されたことを模す。再起動（NewClient の再生成）は行わない。
+	// 環境変数が起動後に設定されたことを模す。再起動（NewClient の再生成）は行わない。
 	t.Setenv("GH_TOKEN", "later-token")
 	if _, err := client.CurrentUser(context.Background()); err != nil {
 		t.Fatalf("CurrentUser() error = %v", err)

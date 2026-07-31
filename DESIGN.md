@@ -74,18 +74,15 @@ Go が決めるのは **「起こすか否か」だけ**とする。何をする
 
 ## 4. 決定事項
 
-| 項目 | 決定 | 却下した選択肢と理由 |
+| 項目 | 決定 | 備考 / 理由 |
 | :-- | :-- | :-- |
-| 実行基盤 | `autopilot-server` (NixOS VM) 上の systemd サービス | ローカル PC の常駐プロセス → 宣言的でない |
-| 宣言性 | Nix で完全宣言。手で入れるのは secret のみ | — |
-| 言語 | Go | TS/bun → Nix でのパッケージングが枯れていない |
-| 状態管理 | SQLite（`/var/lib/nuage-autopilot/state.db`） | ラベル + コメント状態行 → 表現力とコストの両面で限界 |
-| イベント取り込み | `GET /notifications` の条件付きポーリング | 後述（5 節） |
-| プロセスモデル | 単一バイナリの常駐プロセス（`Type=notify`）+ goroutine | oneshot × 3 unit + timers → Nix 側の記述が増え、プロセス間で SQLite を奪い合う |
-| LLM CLI | claude のみ | Antigravity → 一本化する |
-| 検証環境 | 既存の k8s preview (ArgoCD ApplicationSet) | EVPN Zone 払い出し → 過剰 |
-| secret 注入 | 手動配置 + `EnvironmentFile` | sops-nix → 今回は不要 |
-| 観測 | journald → promtail → Loki（既存スタック） | 自作 TUI → 捨てる |
+| 実行基盤 | 単一バイナリの常駐プロセス (Go) | OS や起動方式（systemd, nohup 等）を問わない汎用バイナリ |
+| 言語 | Go | パッケージング・単一バイナリ配布の容易性 |
+| 状態管理 | SQLite（`NUAGE_STATE_DIR` 配下） | 表現力とコストの両面でラベル依存より優れる |
+| イベント取り込み | `GET /notifications` の条件付きポーリング | 外部 inbound 経路不要・stateless/self-healing |
+| プロセスモデル | 単一バイナリの常駐プロセス + 複数 goroutine | プロセス間ロック競合なし・共有メモリでの安全な制御 |
+| LLM CLI | claude のみ | 使用 CLI の一本化 |
+| 環境変数 | `GH_TOKEN` / `NUAGE_STATE_DIR` 等で設定 | 外部インフラ側の環境変数注入（EnvironmentFile 等）に対応 |
 
 ### イベント取り込み手段の選定
 
@@ -351,7 +348,7 @@ phase を進めるための最小情報だけである。
 読み直す探索ターンが消える。
 
 claude のセッションは作業ディレクトリに紐づく。clone のパスは
-`/var/lib/nuage-autopilot/<owner>/<name>` で安定しているため resume が成立する。
+`<stateDir>/<owner>/<name>` で安定しているため resume が成立する。
 
 セッションが肥大化するとコンテキストとコストが増えるため、実行回数または経過時間で
 打ち切り、新規セッションに切り替える。
@@ -430,155 +427,54 @@ worker は 1 回の起床で**イベントを 1 件だけ**処理する。並行
 対象リポジトリの `git clone` は実行時に `stateDir` 配下で行う。Go は clone を
 既定ブランチの最新状態に戻すところまでを担い、PR のチェックアウトはエージェントに任せる。
 
-## 13. リポジトリ境界とデプロイ経路
-
-`nuage-cluster/nix/flake.nix` は `nuage-workspace` を外部 flake input として取り込む。
+## 13. ディレクトリ構成
 
 ```
-nuage-workspace (public)
-  flake.nix
-    packages.x86_64-linux.nuage-autopilot   # buildGoModule
-        │
-        │ inputs.nuage-workspace
-        ▼
-nuage-cluster/nix/
-  hosts/autopilot-server/configuration.nix で nuage-workspace.packages.* を参照し
-  systemd.services.nuage-autopilot を定義
-        │
-        │ master へ push → system.autoUpgrade
-        ▼
-autopilot-server 上で稼働
+nuage-autopilot/
+├── DESIGN.md                   # 本ファイル
+├── README.md
+├── env.example                 # 環境変数設定のテンプレート
+├── flake.nix                   # Nix パッケージ定義
+├── go.mod / vendor/
+├── cmd/
+│   └── nuage-autopilot/
+│       └── main.go             # エントリポイント
+└── internal/
+    ├── config/                 # フラグ・環境変数の解決
+    ├── store/                  # SQLite。items / events / leases / cursors
+    ├── github/                 # Issue / PR / notifications / check-runs (net/http)
+    ├── ingest/                 # notifications ポーラー、resync、イベント正規化
+    ├── engine/                 # 遷移表、lease、予算
+    ├── prompt/                 # エージェントプロンプト作成
+    ├── repo/                   # 対象リポジトリの clone / 更新
+    ├── runner/                 # claude の起動、セッション管理
+    └── daemon/                 # goroutine のループ管理と graceful shutdown
 ```
 
-### 反映手順
+## 14. 設定と環境変数
 
-2 リポジトリにまたがるため順序を守る必要がある。
+シークレットおよび動作設定は、すべて環境変数および CLI コマンドライン引数（`--repos`）経由で渡す。
 
-1. `nuage-workspace` を push
-2. `nuage-cluster/nix` で `nix flake update nuage-workspace`
-3. `nuage-cluster` を push
-4. `sudo nixos-rebuild switch --refresh --flake "https://github.com/k-wa-wa/nuage-cluster/archive/master.tar.gz?dir=nix#autopilot-server"`
-
-`--refresh` は必須である。Nix は tarball を `tarball-ttl`（既定 1 時間）の間キャッシュ
-するため、付けないと push 直後でも古い master を掴む。
-
-## 14. ディレクトリ構成
-
-```
-nuage-workspace/
-├── flake.nix                       # packages を export
-└── autopilot/
-    ├── DESIGN.md                   # 本ファイル
-    ├── go.mod / vendor/            # github.com/ncruces/go-sqlite3 のため vendor をコミットする
-    ├── secrets.env.example
-    ├── cmd/nuage-autopilot/
-    │   └── main.go                 # goroutine の起動と停止のみ
-    └── internal/
-        ├── config/                 # フラグ・環境変数の解決
-        ├── store/                  # SQLite。items / events / leases / cursors
-        ├── github/                 # Issue / PR / notifications / check-runs (net/http)
-        ├── ingest/                 # notifications ポーラー、resync、イベント正規化
-        ├── engine/                 # 遷移表、lease、予算
-        ├── prompt/                 # エージェントのプロンプト（verify は将来）
-        ├── repo/                   # 対象リポジトリの clone / 更新
-        ├── runner/                 # claude の起動、セッション管理
-        └── daemon/                 # goroutine のループ、sd_notify、graceful shutdown
-```
-
-## 15. シークレットの取り扱い
-
-GitHub / Claude のトークンは SOPS で配布しない。流出時の影響が大きいため、
-VM 起動後に手作業で配置する運用とする。
-
-- 配置先: `/var/lib/nuage-autopilot/secrets.env`（`User` (`nixos`) 所有 / `0600`）
-- 参照方法: systemd の `EnvironmentFile`。先頭に `-` を付け、ファイル不在でも起動に失敗させない
-- 書式は systemd の EnvironmentFile であり、シェルスクリプトではない
-
-| 変数 | 用途 |
-| :-- | :-- |
-| `GH_TOKEN` | gh CLI / GitHub API / git push の認証 |
-| `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` | 生成コミットの名義。committer にも同じ値を使う |
-| `NUAGE_ALLOWED_AUTHORS` | 対象とする Issue/PR の作成者のカンマ区切りリスト |
-
-`secrets.env` は誤コミットを防ぐため `.gitignore` に登録する。
-
-### LLM CLI の認証は環境変数で渡さない
-
-claude は CLI の TUI でサインインし、認証情報を実行ユーザーの HOME（`~/.claude`）に
-保存する。API キーを `secrets.env` に置く必要はない。
-
-代わりに、**人間がサインインするユーザーとサービスの実行ユーザーを一致させる**必要がある。
-サインインは VM 上で 1 回だけ行う。
-
-```bash
-ssh nixos@192.168.5.241
-claude   # TUI でサインイン
-```
+| 変数 | 必須/任意 | 用途 |
+| :-- | :-- | :-- |
+| `GH_TOKEN` | 必須 | gh CLI / GitHub API / git push の認証用 Personal Access Token |
+| `GIT_AUTHOR_NAME` | 必須 | 生成コミットの Author / Committer 名 |
+| `GIT_AUTHOR_EMAIL` | 必須 | 生成コミットの Author / Committer メールアドレス |
+| `NUAGE_ALLOWED_AUTHORS` | 任意 | 対象とする Issue/PR の作成者のカンマ区切りリスト（空の場合は全ユーザー対象） |
+| `NUAGE_STATE_DIR` | 任意 | SQLite データベースや作業用クローンを置くディレクトリ（既定: `./state`） |
 
 ### 必須環境変数が未設定のときの挙動
 
-`secrets.env` は手作業で配置する運用のため、VM 作成直後は存在しない。
+起動時に必須環境変数が未設定の場合、警告ログを出力してプロセスはそのまま実行を継続する。
+GitHub API 通信時に環境変数を動的に読み出すため、起動後に環境変数が設定・更新された場合でもプロセス再起動なしで復帰可能とする。
 
-`Restart = "always"` の下で「警告ログを出して即座に終了する」構成にすると、`RestartSec` の
-間隔で再起動を繰り返すだけになる。
+### LLM CLI の認証
 
-そこで**起動時に警告ログを出すが、プロセスは止めない**。poller/worker/resyncer の
-各ループは動き続け、GitHub API を呼ぶ段になって初めてその呼び出しがエラーになる
-（ログに現れる）。`secrets.env` を配置すれば、プロセスを再起動しなくても次の呼び出しから
-自然に復帰できるようにする（`internal/github.Client` は `GH_TOKEN` を起動時に固定せず、
-呼び出しごとに読み直せるようにする）。
+`claude` などの LLM CLI は、CLI 自体の設定（例: `~/.claude`）または各 CLI が要求する標準の認証環境変数を参照する。
+プロセスを実行するユーザー環境で事前に認証を完了させておくこと。
 
 ### 対象アイテムの選別
 
-- **オプトアウト方式**とする。`agent:ignore` ラベルが付いていない open な Issue/PR が対象
-- `NUAGE_ALLOWED_AUTHORS` に該当しない作成者のアイテムは対象外とする
-- 初回認識時は着火しない（7.6 節）
-
-## 16. autopilot-server 側の構成（`nuage-cluster` リポジトリ）
-
-VM は `terraform/vpc/zone-dev/autopilot-server.tf`、OS 構成は
-`nix/hosts/autopilot-server/configuration.nix` で定義する。以下は構築済みである。
-
-- `nix/flake.nix` の `inputs` に `nuage-workspace` を追加し、`nixosConfigurations.autopilot-server` を登録
-- base-vm の qcow2 から起動し、cloud-init の hostname をもとに `nixos-bootstrap` が構成を自動適用
-- `programs.nix-ld` を有効化（インストーラ版 claude の実行に必須）
-- nameserver に lb の CoreDNS VIP `192.168.5.200` を指定。`cluster.wpc` をワイルドカードで
-  解決するため、PR ごとに変わる preview のホスト名にも到達できる
-- systemd サービスの `path` に `"/home/nixos/.local"` を含めて claude を PATH に通す
-
-### unit 定義の要件
-
-単一の常駐 service のみを定義する。timer unit は使わない（間隔はプロセス内部が持つ）。
-
-```nix
-systemd.services.nuage-autopilot = {
-  description = "nuage-autopilot";
-  after = [ "network-online.target" ];
-  wants = [ "network-online.target" ];
-  wantedBy = [ "multi-user.target" ];
-  path = [ pkgs.git pkgs.gh "/home/nixos/.local" ];
-  environment.NUAGE_STATE_DIR = "/var/lib/nuage-autopilot";
-  serviceConfig = {
-    Type = "notify";
-    NotifyAccess = "main";
-    WatchdogSec = "120s";
-    Restart = "always";
-    RestartSec = "10s";
-    StateDirectory = "nuage-autopilot";
-    EnvironmentFile = "-/var/lib/nuage-autopilot/secrets.env";
-    TimeoutStopSec = "5m";
-    ExecStart = "${lib.getExe pkg} --repos ${reposArg}";
-    User = "nixos";
-  };
-};
-```
-
-- `Type = "notify"` + `WatchdogSec` で起動状態の通知とハング時の再起動を行う
-- `Restart = "always"` とする。クラッシュしても lease の TTL により作業は自然に再開される
-- `TimeoutStopSec` は実行中の claude に猶予を与えるため長めに取る
-- `User = "nixos"`（`DynamicUser` は使わない。`git clone` と claude が固定の HOME を
-  要求するため）
-- `EnvironmentFile` は先頭 `-` 付き（ファイルが存在しなくても起動失敗させない）
-- `path` に `pkgs.git` / `pkgs.gh` / `"/home/nixos/.local"`（claude インストーラの配置先）を含める
-
-人手が必要な作業は `secrets.env` の配置と claude の TUI サインインのみである。
+- **オプトアウト方式**とする。`agent:ignore` ラベルが付いていない open な Issue/PR が対象。
+- `NUAGE_ALLOWED_AUTHORS` に該当しない作成者のアイテムは対象外とする。
+- 初回認識時は着火しない（7.6 節）。

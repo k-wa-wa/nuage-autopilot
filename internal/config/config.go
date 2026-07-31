@@ -10,7 +10,7 @@ import (
 )
 
 // DefaultStateDir は --state-dir / NUAGE_STATE_DIR のいずれも指定されなかった場合の既定値である。
-const DefaultStateDir = "/var/lib/nuage-autopilot"
+const DefaultStateDir = "./state"
 
 // DefaultAllowedAuthors は --allowed-authors / NUAGE_ALLOWED_AUTHORS のいずれも指定されなかった場合の既定値である。
 const DefaultAllowedAuthors = "k-wa-wa,bot-wa-wa"

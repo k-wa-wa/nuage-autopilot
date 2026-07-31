@@ -65,7 +65,7 @@ func TestBuildAgent_ProhibitsUnsafeOperations(t *testing.T) {
 		"force push",
 		"SOPS",
 		"Terraform",
-		"secrets.env",
+		"機密情報",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("prompt does not mention prohibition %q:\n%s", want, out)

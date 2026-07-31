@@ -87,7 +87,7 @@ const freedoms = `## 許可されている操作
 const prohibitions = `## 禁止事項（理由の如何を問わず実行しない）
 - 既定ブランチ (main / master) への直接 push、force push、ブランチ・タグの削除
 - 他者の PR / Issue の close、他者のコメントの編集・削除
-- secrets.env をはじめとする機密ファイルの閲覧・標準出力への出力・コミット、および
+- シークレットファイルや機密情報の閲覧・標準出力への出力・コミット、および
   環境変数の値（GH_TOKEN 等）の出力
 - SOPS / Terraform / Terragrunt の実行
 - GitHub Actions の secrets・ワークフロー権限の変更
