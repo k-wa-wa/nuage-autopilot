@@ -95,31 +95,9 @@ Go が決めるのは **「起こすか否か」だけ**とする。何をする
 
 ### イベント取り込み手段の選定
 
-autopilot-server を含むクラスタには**インターネットからの inbound 経路が無い**
-（`bare-web-proxy` の prod ingress は内部 CA の `ca-clusterissuer` を使い、ホスト名も
-内部ゾーンの `*.cluster.wpc` である）。したがって素の webhook は選択できず、
-実質「トンネル」対「ポーリング」の比較になる。
-
-| | notifications ポーリング | `gh webhook forward` | cloudflared + webhook |
-| :-- | :-- | :-- | :-- |
-| 常駐プロセス | 不要 | 必要 | 必要 |
-| 宣言性 | 保てる | `gh extension install` が必要で崩れる | nixpkgs にあり保てる |
-| 配信の再送 | cursor で自然に追いつく | **無い（落ちている間のイベントは消える）** | GitHub 側で redeliver 可能 |
-| CI (`check_suite`) | 取れない（別途取得が必要） | 取れる | 取れる |
-| 遅延 | 最大 1 分 | 約 1 秒 | 約 1 秒 |
-
-**notifications を採用する。** 判断の根拠は次の通りである。
-
-- 遅延は利点にならない。ストーリーの各ステップは人間が issue を書く・回答する・preview を
-  見るという人間ペースで進み、エージェントの実行自体が数分から数十分かかる。1 分は
-  体感差にならない
-- ポーリングは stateless かつ self-healing であり、故障モードが「遅れる」しかない。
-  トンネルは「黙って死ぬ」故障モードを持ち、しかも `gh webhook forward` は再送を持たない
-- `gh webhook forward` は開発用ツールとして提供されており、24/7 の可用性を前提にしていない
-
-ただし**取り込み手段は差し替え可能な形で実装する**（7.1 節）。遅延や CI イベントの
-取り扱いが実際に痛くなった場合は、cloudflared 経由の webhook receiver を
-同じ `events` テーブルに書き込む source として追加する。下流は一切変更しない。
+クラスタ内に外部からの inbound 経路が無いため、**notifications の条件付きポーリング**を採用する。
+ポーリングは stateless かつ self-healing であり、人間ペースの開発サイクル（数分〜数十分）において 1 分程度の遅延は実用上の支障にならない。
+なお、取り込み手段は拡張可能な構造（7.1 節）とし、必要に応じて webhook receiver 等を同じ `events` テーブルへの供給源として追加できるようにする。
 
 ## 5. アーキテクチャ
 
@@ -428,30 +406,12 @@ phase を進めるための最小情報だけである。
 
 結果として、blocked の説明文は「実際に作業したエージェントが書いたもの」になり、原因や状態を的確に把握できる。
 
-### 8.4 verify（枠だけ用意し、初版では実装しない）
+### 8.4 verify（将来の拡張枠）
 
-ストーリー 4 は「実装**レビューした**プロトタイプ」を求めている。
+現行ではエージェントの自己レビュー（実装・テスト・自己レビュー・PR作成を一括実行）で完結させるが、将来的な別セッションによる第三者レビュー（`verify`）の追加に備えて以下のインターフェース枠を保持する。
 
-**初版ではエージェントの自己レビューでこれを満たす。** 実装したセッションがそのまま
-差分を見直し、テストを通し、PR を作る。安いが、書いた本人であるためバイアスがかかる。
-
-将来、別セッションによる第三者レビューを `verify` として追加する。そのときの仕様は
-次の通りとし、今は枠だけ空けておく。
-
-- **起動契機は「CI が緑になった瞬間」に限る。** push のたびではなく CI 緑への遷移に絞ることで、無駄な呼び出しを防止し、原則 PR あたり 1 回の実行に抑える。
-- コードは一切変更しない。`passed` なら `ready`、`failed` なら `verify_failed` イベントを
-  自ら enqueue して `in_review` に留める（次の worker 起床がエージェントを起こす）。
-  合成イベントを使うことで通常のイベント経路と同じ仕組みに乗る
-
-枠として用意しておくものは 2 点だけである。
-
-1. **実行モードの区別**（`agent` / `verify`）を `internal/runner` と `internal/prompt` の
-   インターフェースに持たせる。初版では `agent` のみを実装する
-2. **`ready` phase を初版から持つ。** 初版では `in_review` + `ci_success` が直接
-   `ready` に遷移し、verify 追加時にその間へ差し込む形になる
-
-`ready` は「人間のマージ待ち」を表す phase であり、verify の有無にかかわらず意味を持つ。
-ここを最初から分けておくことで、後から verify を入れても遷移表の他の行に影響しない。
+1. **実行モードの区別**: `internal/runner` および `internal/prompt` に `ModeAgent` / `ModeVerify` の区別を持たせる（現在は `agent` のみ実装）。
+2. **`ready` phase の独立**: `in_review` + `ci_success` から `ready` へ遷移する構造を保ち、将来 verify を差し込める設計とする。
 
 ### 8.5 何を解放し、何を締めるか
 
@@ -713,52 +673,3 @@ systemd.services.nuage-autopilot = {
 
 人手が必要な作業は `secrets.env` の配置と claude の TUI サインインのみである。
 
-## 17. テスト戦略
-
-| 層 | 実行場所 | 内容 |
-| :-- | :-- | :-- |
-| L1 単体 | CI (GitHub Actions) | ビルド・単体テスト・lint |
-| L2 結合 | CI | SQLite を含む結合テスト。GitHub API はフェイクサーバで代替する |
-| L3 E2E | preview namespace（本番クラスタ） | `pechka-pr-N.cluster.wpc` への E2E |
-| L4 探索的 | ローカル PC + AI エージェント | インフラ・破壊的作業 |
-
-## 18. 実装フェーズ
-
-### Phase 1: 状態基盤とプロセスの骨格（完了）
-
-`internal/store` の SQLite スキーマとマイグレーション、`items` / `events` / `leases` /
-`cursors` の CRUD。`internal/daemon` の goroutine ループ・`sd_notify`・graceful shutdown。
-この段階では LLM も GitHub も呼ばず、空回りするデーモンとして systemd 上で安定稼働させる。
-
-### Phase 2: 取り込み（完了）
-
-notifications ポーラー、自己コメントのフィルタ（7.3 節。**最優先で正しく実装する**）、
-CI チェックランの取得、resync、初回着火の抑止。この段階でイベントが DB に溜まることを
-確認する。
-
-### Phase 3: 遷移とエージェント（初版の完成。完了）
-
-遷移表（`internal/engine/transition.go`）、lease、予算、claude の起動とセッション管理
-（`--resume` と `--output-format json` による `session_id`/`total_cost_usd` の取得）、
-`NUAGE_REPORT_FILE` の読み取りを実装した（`internal/engine`、`internal/prompt`）。
-レビューはエージェントの自己レビューで満たす（8.4 節）。verify（第三者レビュー）は
-Phase 5 まで未実装であり、`ready` phase への遷移は `in_review` + `ci_success` から
-直接行う。
-
-### Phase 4: サブ Issue 分割（完了）
-
-`outcome = "split"` と親子伝播、`delegated` phase の運用、全子完了時の `child_done`
-enqueue を `internal/engine` に実装した。9章に記載の通り、初版では親と同じリポジトリの
-サブ Issue のみに対応する。
-
-### Phase 5: verify
-
-第三者レビューを別セッションとして追加する（8.4 節）。
-
-### Phase 6: preview 環境との接続
-
-verify から `pechka-pr-N.cluster.wpc` に対して E2E を実行する。
-
-### Phase 7: 観測駆動
-
-Alertmanager の webhook receiver を生やし、アラートから Issue を自動起票する。
