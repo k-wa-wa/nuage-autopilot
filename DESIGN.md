@@ -10,8 +10,8 @@ Issue に「やりたいこと」を曖昧なまま書けば、エージェン�
 レビューを済ませた PR が上がってくる。preview を見てフィードバックを書けば PR が修正される。
 人間が明示的に行うのは「書くこと」と「マージすること」だけである。
 
-リスクの高い作業（インフラ・Talos・Terraform・SOPS）は従来通りローカル PC で人間と対話
-しながら行う。自動化の対象はアプリ層の変更に限る。
+リスクの高い作業（インフラ・Talos・Terraform・SOPS）は従来通りローカル PC で人間と対話しながら行う。
+自動化の対象はソースコードの変更、Github Actions によりデプロイされるアプリに限る。
 
 ## 2. ユーザーストーリー（これが仕様である）
 
@@ -27,7 +27,6 @@ Issue に「やりたいこと」を曖昧なまま書けば、エージェン�
 Issue が大きい場合は、エージェントがサブ Issue に分割しながら進める。
 
 この 8 ステップのうち、**2・4・7 以外のすべてが人間の行動によって駆動される**。
-本設計はこの構造をそのまま実装に写し取る。
 
 ## 3. 設計の中核にある 3 つの判断
 
@@ -43,15 +42,13 @@ Issue が大きい場合は、エージェントがサブ Issue に分割しな�
 | 8. マージ | PR が close / merge された |
 | （実装後の合否） | CI チェックが完了した |
 
-イベントを取り込めば「何が起きたか」が最初から手に入る。**イベントが無ければ LLM も
-GitHub API もほぼ呼ばない**。これがコスト削減の最大のレバーである。
+イベントを取り込めば「何が起きたか」が最初から手に入る。**イベントが無ければ LLM も GitHub API もほぼ呼ばない**。
 
 全コメントの取得やパースによる状態復元を不要とし、差分イベントのみに基づいてリアクティブに動作する。
 
 ### 3.2 状態は SQLite に持つ
 
-状態を SQLite に保存することで以下が可能になる。
-
+状態を SQLite に保存することで以下を実現する。
 
 | 目的・メリット | 詳細 |
 | :-- | :-- |
@@ -61,9 +58,7 @@ GitHub API もほぼ呼ばない**。これがコスト削減の最大のレバ�
 | 予算（コスト・実行回数）の蓄積 | ドルベースの実コストと実行回数による正確な安全網を提供する |
 | 「回答待ち」をラベルで表現しない | 人間のコメント投稿イベントによって自律的に処理が再開される |
 
-**DB は真実ではない。GitHub が真実である。** したがって低頻度の全走査（resync）による
-修復を必ず併走させる。これは Kubernetes のコントローラが watch と定期 resync を
-併用しているのと同じ構造である。
+**DB は真実ではない。GitHub が真実である。** したがって低頻度の全走査（resync）による修復を必ず併走させる。
 
 ### 3.3 エージェントを自由にし、Go は「起こすか否か」だけを決める
 
@@ -84,7 +79,6 @@ Go が決めるのは **「起こすか否か」だけ**とする。何をする
 | 実行基盤 | `autopilot-server` (NixOS VM) 上の systemd サービス | ローカル PC の常駐プロセス → 宣言的でない |
 | 宣言性 | Nix で完全宣言。手で入れるのは secret のみ | — |
 | 言語 | Go | TS/bun → Nix でのパッケージングが枯れていない |
-| 実装場所 | `nuage-workspace/autopilot/` | 別リポジトリ → 横断管理の場に集約したい |
 | 状態管理 | SQLite（`/var/lib/nuage-autopilot/state.db`） | ラベル + コメント状態行 → 表現力とコストの両面で限界 |
 | イベント取り込み | `GET /notifications` の条件付きポーリング | 後述（5 節） |
 | プロセスモデル | 単一バイナリの常駐プロセス（`Type=notify`）+ goroutine | oneshot × 3 unit + timers → Nix 側の記述が増え、プロセス間で SQLite を奪い合う |
@@ -95,7 +89,7 @@ Go が決めるのは **「起こすか否か」だけ**とする。何をする
 
 ### イベント取り込み手段の選定
 
-クラスタ内に外部からの inbound 経路が無いため、**notifications の条件付きポーリング**を採用する。
+外部からの inbound 経路の作成を避けるため、**notifications の条件付きポーリング**を採用する。
 ポーリングは stateless かつ self-healing であり、人間ペースの開発サイクル（数分〜数十分）において 1 分程度の遅延は実用上の支障にならない。
 なお、取り込み手段は拡張可能な構造（7.1 節）とし、必要に応じて webhook receiver 等を同じ `events` テーブルへの供給源として追加できるようにする。
 
@@ -131,9 +125,8 @@ GitHub ──→ [poller]      1 分ごと。notifications を取り込む   │
 - Nix 側の構成定義が 1 つの systemd サービスのみでシンプルになる
 - SQLite を単一プロセス内の `*sql.DB` 1 つで共有できるため、複数プロセス間でのロック競合が発生しない
 
-poller は enqueue 後にチャネルで worker を起こす。イベントが積まれた瞬間に処理が
-始まるため、ポーリング間隔ぶんの待ちが発生しない。チャネルはバッファ 1 のノンブロッキング
-送信とし、worker が取りこぼしても次の定期起床（1 分）が拾う。
+poller は enqueue 後にチャネルで worker を起こす。イベントが積まれた瞬間に処理が始まるため、ポーリング間隔ぶんの待ちが発生しない。
+チャネルはバッファ 1 のノンブロッキング送信とし、worker が取りこぼしても次の定期起床（1 分）が拾う。
 
 worker が 30 分かかっている間も poller と resyncer は動き続ける。
 
@@ -191,81 +184,12 @@ lease は TTL を持つため、解放できずに終了しても最終的には
 
 ### 6.3 スキーマ
 
-```sql
-PRAGMA user_version = 1;
-
-CREATE TABLE items (
-  id           INTEGER PRIMARY KEY,
-  repo         TEXT    NOT NULL,           -- "owner/name"
-  number       INTEGER NOT NULL,
-  kind         TEXT    NOT NULL,           -- issue | pull_request
-  phase        TEXT    NOT NULL,
-  parent_id    INTEGER REFERENCES items(id),
-  session_id   TEXT,                       -- claude --resume 用
-  head_sha     TEXT,
-  cost_usd     REAL    NOT NULL DEFAULT 0,
-  runs         INTEGER NOT NULL DEFAULT 0,
-  last_seen_at TEXT,                       -- 取り込み済みコメントの最新時刻
-  updated_at   TEXT    NOT NULL,
-  UNIQUE(repo, number)
-);
-
-CREATE TABLE events (
-  id           INTEGER PRIMARY KEY,
-  dedup_key    TEXT    NOT NULL UNIQUE,    -- "comment:<id>" 等
-  item_id      INTEGER NOT NULL REFERENCES items(id),
-  type         TEXT    NOT NULL,
-  actor        TEXT    NOT NULL,
-  body         TEXT,
-  created_at   TEXT    NOT NULL,
-  processed_at TEXT                        -- NULL = 未処理（これがキューである）
-);
-
-CREATE TABLE leases (
-  item_id    INTEGER PRIMARY KEY REFERENCES items(id),
-  holder     TEXT NOT NULL,                -- host:pid
-  expires_at TEXT NOT NULL
-);
-
-CREATE TABLE cursors (
-  source        TEXT PRIMARY KEY,          -- "notifications"
-  etag          TEXT,
-  last_modified TEXT,
-  since         TEXT,
-  polled_at     TEXT
-);
-```
+[migrations/ 参照](./internal/store/migrations/)
 
 `events.processed_at IS NULL` がそのまま処理待ちキューになる。別途キュー機構を持たない。
 
 `dedup_key` の UNIQUE 制約が冪等性を保証する。同じコメントを何度取り込んでも
 イベントは 1 件しか生まれない。webhook を追加した場合は delivery ID をここに入れる。
-
-### 6.4 SQLite ドライバと vendorHash
-
-**pure-Go の実装（`github.com/ncruces/go-sqlite3`）を使う。** cgo が入ると
-`buildGoModule` でのビルドと後述の `vendorHash = null` 運用が破綻するためである。
-
-`modernc.org/sqlite` は GOOS/GOARCH の組み合わせごとに C→Go
-変換済みコードを vendor するため `vendor/` が 200MB を超える。一方 `ncruces/go-sqlite3` は
-SQLite 本体を WebAssembly にコンパイルしたバイナリ 1 つを `go:embed` で組み込む方式
-（wazero による pure-Go の WASM ランタイムで実行する）であり、vendor サイズが
-約 14MB に収まる。ビルド・実行時ともネットワークアクセスは不要である。
-
-`buildGoModule` は通常 `vendorHash` を要求し、`go.mod` を変更するたびにハッシュがズレて
-ビルドが落ちる。**このシステムはエージェント自身が依存を追加する**ため、これは致命的である。
-そこで `vendorHash = null` を指定してハッシュ管理を不要にし、`go mod vendor` した
-`vendor/` をコミットすることでこれを成立させる。
-
-`go.mod` の `go` ディレクティブは nixpkgs 24.11 が同梱する Go（1.23.8）を超えない
-バージョンに固定する必要がある。依存を `go get <pkg>@latest` で追加すると、
-Go ツールチェイン自身が要求する `go` ディレクティブを引き上げてしまうことがあるため、
-追加のたびに `go.mod` の `go` 行を確認し、必要なら依存を 1 つ前のマイナーバージョンへ
-固定する。
-
-SQLite ドライバの追加に伴い `vendor/` のコミットを必須としている。依存はこれ以外に
-増やさない方針を維持する。GitHub API は `net/http` で直接叩き、git 操作と認証は
-`git` / `gh` CLI をサービスの PATH 経由で呼ぶ。
 
 ## 7. イベント取り込み
 
