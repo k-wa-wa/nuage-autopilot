@@ -132,20 +132,7 @@ worker が 30 分かかっている間も poller と resyncer は動き続ける
 
 ### ハング検知
 
-常駐プロセスにおけるハング検知のため、3 層の保護機構を設ける。
-
-| 層 | 対象 | 手段 |
-| :-- | :-- | :-- |
-| claude の実行 | エージェント 1 回の実行 | `context.WithTimeout`（既定 120 分）。`exec.CommandContext` が子プロセスを殺す |
-| HTTP | GitHub API 呼び出し | `http.Client.Timeout` |
-| プロセス全体 | デッドロック・goroutine の停止 | systemd の `WatchdogSec` + `sd_notify` |
-
-watchdog goroutine は、poller / worker / resyncer がそれぞれ更新する
-「最終生存時刻」（atomic）を確認し、すべてが期待間隔内に動いている場合にのみ
-`WATCHDOG=1` を送る。停止していれば送信をやめ、systemd がプロセスを再起動する。
-
-`sd_notify` は `$NOTIFY_SOCKET` への datagram 送信であり、外部依存を必要としない
-（数十行の自前実装で足りる）。
+エージェント実行・HTTP 通信のタイムアウトに加え、`watchdog` goroutine が各ループの生存を確認し `sd_notify`（`WATCHDOG=1`）を送ることで、デッドロック時に systemd による自動再起動が行われる。
 
 ### 停止時の挙動
 
@@ -586,8 +573,7 @@ systemd.services.nuage-autopilot = {
 };
 ```
 
-- `Type = "notify"` + `WatchdogSec` でハング時に再起動させる。プロセスは起動完了時に
-  `READY=1` を、以後 30 秒ごとに `WATCHDOG=1` を送る
+- `Type = "notify"` + `WatchdogSec` で起動状態の通知とハング時の再起動を行う
 - `Restart = "always"` とする。クラッシュしても lease の TTL により作業は自然に再開される
 - `TimeoutStopSec` は実行中の claude に猶予を与えるため長めに取る
 - `User = "nixos"`（`DynamicUser` は使わない。`git clone` と claude が固定の HOME を
@@ -596,4 +582,3 @@ systemd.services.nuage-autopilot = {
 - `path` に `pkgs.git` / `pkgs.gh` / `"/home/nixos/.local"`（claude インストーラの配置先）を含める
 
 人手が必要な作業は `secrets.env` の配置と claude の TUI サインインのみである。
-
