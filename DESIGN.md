@@ -250,7 +250,7 @@ resync（7.5 節）はこの図には現れない。resync は `items` を GitHu
       → 304 なら即終了。rate limit を消費しない
 2. 200 → 更新されたスレッド一覧を得る
 3. 変化したアイテムについてのみ GET /issues/{n}/comments?since=<item.last_seen_at>
-4. actor == bot login のものを捨てる
+4. actor == bot login のもの、および NUAGE_ALLOWED_AUTHORS に含まれない actor のものを捨てる
 5. 残りを events に enqueue し、item.last_seen_at と cursor を更新する
 ```
 
@@ -504,7 +504,7 @@ clone / 最新化する。これにより作業ディレクトリの兄弟ディ
 | フラグ | 必須/任意 | 用途 |
 | :-- | :-- | :-- |
 | `--repos` | 必須 | 対象リポジトリのカンマ区切りリスト（`owner/name` 形式） |
-| `--allowed-authors` | 任意 | 対象とする Issue/PR 作成者のカンマ区切りリスト。未指定時は `NUAGE_ALLOWED_AUTHORS`、それも無ければ既定値 |
+| `--allowed-authors` | 任意 | 対象とする Issue/PR 作成者、および反応するコメント投稿者のカンマ区切りリスト。未指定時は `NUAGE_ALLOWED_AUTHORS`、それも無ければ既定値 |
 | `--version` | 任意 | バージョンを表示して終了する |
 
 | 変数 | 必須/任意 | 用途 |

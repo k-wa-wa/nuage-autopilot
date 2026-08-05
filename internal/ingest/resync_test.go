@@ -38,7 +38,7 @@ func newTestResyncer(t *testing.T, handler http.HandlerFunc, opts ...func(*Resyn
 func TestResync_RegistersNewItemsWithoutEvents(t *testing.T) {
 	r, st := newTestResyncer(t, func(w http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
-	case "/repos/k-wa-wa/pechka/issues":
+		case "/repos/k-wa-wa/pechka/issues":
 			writeJSON(w, `[{"number": 1, "title": "an issue", "state": "open", "body": "x", "user": {"login": "alice", "type": "User"}, "created_at": "2026-08-01T10:00:00Z"}]`)
 		case "/repos/k-wa-wa/pechka/pulls":
 			writeJSON(w, `[{"number": 2, "title": "a pr", "state": "open", "body": "y", "user": {"login": "alice", "type": "User"}, "head": {"sha": "abc123"}, "created_at": "2026-08-01T11:00:00Z"}]`)
