@@ -75,8 +75,17 @@ func (r *Resyncer) resyncRepo(ctx context.Context, repo string) error {
 		if !isAllowedAuthor(is.User.Login, r.AllowedAuthors) || hasIgnoreLabel(is.Labels) {
 			continue
 		}
-		if _, _, err := r.Store.UpsertItem(ctx, repo, is.Number, store.KindIssue); err != nil {
+		item, _, err := r.Store.UpsertItem(ctx, repo, is.Number, store.KindIssue)
+		if err != nil {
 			return fmt.Errorf("upsert issue #%d: %w", is.Number, err)
+		}
+		// resync で初めて登録されたアイテムは last_seen_at が未設定 (nil) になる。
+		// その後の poller によるコメント差分取得で正しく基準点として参照できるよう、
+		// Issue 自身の作成日時でベースライン初期化する（DESIGN.md 7.5, 7.6 節）。
+		if item.LastSeenAt == nil {
+			if err := r.Store.UpdateItemLastSeenAt(ctx, item.ID, is.CreatedAt); err != nil {
+				return fmt.Errorf("baseline last_seen_at for issue #%d: %w", is.Number, err)
+			}
 		}
 	}
 
@@ -88,6 +97,14 @@ func (r *Resyncer) resyncRepo(ctx context.Context, repo string) error {
 		item, _, err := r.Store.UpsertItem(ctx, repo, pr.Number, store.KindPullRequest)
 		if err != nil {
 			return fmt.Errorf("upsert pr #%d: %w", pr.Number, err)
+		}
+		// resync で初めて登録されたアイテムは last_seen_at が未設定 (nil) になる。
+		// その後の poller によるコメント差分取得で正しく基準点として参照できるよう、
+		// PR 自身の作成日時でベースライン初期化する（DESIGN.md 7.5, 7.6 節）。
+		if item.LastSeenAt == nil {
+			if err := r.Store.UpdateItemLastSeenAt(ctx, item.ID, pr.CreatedAt); err != nil {
+				return fmt.Errorf("baseline last_seen_at for pr #%d: %w", pr.Number, err)
+			}
 		}
 		if pr.HeadSHA != "" && pr.HeadSHA != item.HeadSHA {
 			if err := r.Store.UpdateItemHeadSHA(ctx, item.ID, pr.HeadSHA); err != nil {

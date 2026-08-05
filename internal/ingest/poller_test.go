@@ -388,8 +388,8 @@ func TestPoll_ExistingItemEnqueuesNewCommentAndFiltersSelf(t *testing.T) {
 }
 
 // TestPoll_ExistingItemWithNilLastSeenAtBaselinesWithoutEvent は、resync が
-// last_seen_at を設定しないまま登録したアイテムを poller が初めて処理する場合、
-// 全既存コメントをイベント化せず静かにベースラインすることを検証する。
+// last_seen_at を設定しないまま登録した旧形式アイテム等を poller が初めて処理する場合、
+// CreatedAt でベースラインを確立することを検証する。
 func TestPoll_ExistingItemWithNilLastSeenAtBaselinesWithoutEvent(t *testing.T) {
 	p, st := newTestPoller(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -399,8 +399,13 @@ func TestPoll_ExistingItemWithNilLastSeenAtBaselinesWithoutEvent(t *testing.T) {
 			writeJSON(w, `[{"id": "1", "unread": true, "reason": "subscribed", "updated_at": "2026-07-29T00:00:00Z",
 				"subject": {"title": "resync discovered", "url": "https://api.github.com/repos/k-wa-wa/pechka/issues/6", "type": "Issue"},
 				"repository": {"full_name": "k-wa-wa/pechka"}}]`)
+		case "/repos/k-wa-wa/pechka/issues/6":
+			writeJSON(w, `{"number": 6, "title": "resync discovered", "body": "old", "state": "open",
+				"user": {"login": "alice", "type": "User"}, "created_at": "2026-07-29T00:00:00Z"}`)
+		case "/repos/k-wa-wa/pechka/issues/6/comments":
+			writeJSON(w, `[]`)
 		default:
-			t.Fatalf("unexpected request (comments must not be fetched without a baseline): %s %s", r.Method, r.URL.Path)
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 	})
 
@@ -438,8 +443,7 @@ func TestPollCheckRuns_EnqueuesOnceThenDedupsUntilShaChanges(t *testing.T) {
 		case r.URL.Path == "/notifications":
 			w.WriteHeader(http.StatusNotModified)
 		case r.URL.Path == "/repos/k-wa-wa/pechka/commits/deadbeef/check-runs":
-			writeJSON(w, fmt.Sprintf(`{"total_count": 1, "check_runs": [{"name": "test", "status": "completed", "conclusion": %q}]}`,
-				map[string]string{"success": "success", "failure": "failure"}[state]))
+			writeJSON(w, fmt.Sprintf(`{"total_count": 1, "check_runs": [{"status": "completed", "conclusion": %q}]}`, state))
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -517,5 +521,71 @@ func TestPoller_EnsureSubscriptions(t *testing.T) {
 
 	if subCalls["k-wa-wa/pechka"] != 1 {
 		t.Fatalf("subCalls = %d, want 1", subCalls["k-wa-wa/pechka"])
+	}
+}
+
+// TestPoll_NilLastSeenAtBaselinedWithCreatedAtAndEnqueuesComment は、
+// resync 等により DB 上で last_seen_at が nil の既存アイテムに対し、
+// 人間からのコメント通知が届いた際に Issue/PR の作成日時でベースラインが確立され、
+// 新着コメントが正常にイベント化されることを検証する（DESIGN.md 7.2, 7.6 節）。
+func TestPoll_NilLastSeenAtBaselinedWithCreatedAtAndEnqueuesComment(t *testing.T) {
+	p, st := newTestPoller(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			writeJSON(w, `{"login": "nuage-autopilot"}`)
+		case r.URL.Path == "/notifications":
+			writeJSON(w, `[{"id": "1", "unread": true, "reason": "comment", "updated_at": "2026-08-05T10:00:00Z",
+				"subject": {"title": "some PR", "url": "https://api.github.com/repos/k-wa-wa/pechka/pulls/20", "type": "PullRequest"},
+				"repository": {"full_name": "k-wa-wa/pechka"}}]`)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/20":
+			writeJSON(w, `{"number": 20, "title": "some PR", "body": "PR body", "state": "open",
+				"user": {"login": "alice", "type": "User"}, "head": {"sha": "abc123"}, "created_at": "2026-08-01T00:00:00Z"}`)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/issues/20/comments":
+			writeJSON(w, `[{"id": 500, "body": "hello from human", "user": {"login": "alice", "type": "User"}, "created_at": "2026-08-05T09:50:00Z"}]`)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/pulls/20/comments" || r.URL.Path == "/repos/k-wa-wa/pechka/pulls/20/reviews":
+			writeJSON(w, `[]`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	ctx := context.Background()
+
+	// resync が先行登録した状態 (last_seen_at = nil) を準備
+	item, _, err := st.UpsertItem(ctx, "k-wa-wa/pechka", 20, store.KindPullRequest)
+	if err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+	if item.LastSeenAt != nil {
+		t.Fatalf("item.LastSeenAt should be nil initially")
+	}
+
+	if err := st.SaveCursor(ctx, notificationsSource, "", "", "2026-01-01T00:00:00Z"); err != nil {
+		t.Fatalf("SaveCursor: %v", err)
+	}
+
+	n, err := p.Poll(ctx)
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("enqueued = %d, want 1", n)
+	}
+
+	ev, ok, err := st.NextUnprocessedEvent(ctx)
+	if err != nil || !ok {
+		t.Fatalf("NextUnprocessedEvent: ok=%v err=%v", ok, err)
+	}
+	if ev.Type != "commented" || ev.Actor != "alice" || ev.Body != "hello from human" {
+		t.Fatalf("event = %+v, want commented by alice", ev)
+	}
+
+	// last_seen_at がコメント作成日時で更新されたか確認
+	updatedItem, ok, err := st.GetItem(ctx, "k-wa-wa/pechka", 20)
+	if err != nil || !ok {
+		t.Fatalf("GetItem: ok=%v err=%v", ok, err)
+	}
+	if updatedItem.LastSeenAt == nil || updatedItem.LastSeenAt.Format(time.RFC3339) != "2026-08-05T09:50:00Z" {
+		t.Fatalf("updatedItem.LastSeenAt = %v, want 2026-08-05T09:50:00Z", updatedItem.LastSeenAt)
 	}
 }

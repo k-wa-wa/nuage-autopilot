@@ -236,14 +236,18 @@ func (p *Poller) admitAndBaseline(ctx context.Context, repo string, kind store.K
 // 別途 head_sha を再取得して最新化する。
 func (p *Poller) diffComments(ctx context.Context, item store.Item, kind store.Kind, botLogin string) (int, error) {
 	if item.LastSeenAt == nil {
-		// last_seen_at が未確立（resync がこのアイテムを先に登録しただけで、
-		// まだ poller が一度も処理していない）。基準点が無いまま差分を取ると
-		// 全既存コメントが「新着」になってしまうため、今の時点で静かに
-		// ベースラインするに留める。
-		if err := p.Store.UpdateItemLastSeenAt(ctx, item.ID, time.Now()); err != nil {
+		// last_seen_at が未確立（旧バージョンの DB データや手動登録等）。
+		// time.Now() で上書きすると直前の新着コメントが無視されてしまうため、
+		// Issue/PR 自身の作成日時でベースラインを確立してから差分取得を続行する
+		// （DESIGN.md 7.2, 7.6 節）。
+		detail, err := fetchDetail(ctx, p.Client, item.Repo, kind, item.Number)
+		if err != nil {
+			return 0, fmt.Errorf("fetch detail for baseline: %w", err)
+		}
+		if err := p.Store.UpdateItemLastSeenAt(ctx, item.ID, detail.CreatedAt); err != nil {
 			return 0, fmt.Errorf("baseline last_seen_at: %w", err)
 		}
-		return 0, nil
+		item.LastSeenAt = &detail.CreatedAt
 	}
 
 	comments, err := p.Client.ListCommentsSince(ctx, item.Repo, item.Number, *item.LastSeenAt, kind == store.KindPullRequest)
@@ -257,7 +261,7 @@ func (p *Poller) diffComments(ctx context.Context, item store.Item, kind store.K
 		if c.CreatedAt.After(latest) {
 			latest = c.CreatedAt
 		}
-		if isSelfOrBot(c, botLogin) {
+		if isSelfOrBot(c, botLogin) || !isAllowedAuthor(c.User.Login, p.AllowedAuthors) {
 			continue
 		}
 

@@ -39,9 +39,9 @@ func TestResync_RegistersNewItemsWithoutEvents(t *testing.T) {
 	r, st := newTestResyncer(t, func(w http.ResponseWriter, req *http.Request) {
 		switch req.URL.Path {
 		case "/repos/k-wa-wa/pechka/issues":
-			writeJSON(w, `[{"number": 1, "title": "an issue", "state": "open", "body": "x", "user": {"login": "alice", "type": "User"}}]`)
+			writeJSON(w, `[{"number": 1, "title": "an issue", "state": "open", "body": "x", "user": {"login": "alice", "type": "User"}, "created_at": "2026-08-01T10:00:00Z"}]`)
 		case "/repos/k-wa-wa/pechka/pulls":
-			writeJSON(w, `[{"number": 2, "title": "a pr", "state": "open", "body": "y", "user": {"login": "alice", "type": "User"}, "head": {"sha": "abc123"}}]`)
+			writeJSON(w, `[{"number": 2, "title": "a pr", "state": "open", "body": "y", "user": {"login": "alice", "type": "User"}, "head": {"sha": "abc123"}, "created_at": "2026-08-01T11:00:00Z"}]`)
 		default:
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
@@ -58,6 +58,9 @@ func TestResync_RegistersNewItemsWithoutEvents(t *testing.T) {
 	if issue.Phase != store.PhaseNew {
 		t.Fatalf("issue.Phase = %q, want %q", issue.Phase, store.PhaseNew)
 	}
+	if issue.LastSeenAt == nil || issue.LastSeenAt.Format(time.RFC3339) != "2026-08-01T10:00:00Z" {
+		t.Fatalf("issue.LastSeenAt = %v, want 2026-08-01T10:00:00Z", issue.LastSeenAt)
+	}
 
 	pr, ok, err := st.GetItem(context.Background(), "k-wa-wa/pechka", 2)
 	if err != nil || !ok {
@@ -65,6 +68,9 @@ func TestResync_RegistersNewItemsWithoutEvents(t *testing.T) {
 	}
 	if pr.HeadSHA != "abc123" {
 		t.Fatalf("pr.HeadSHA = %q, want abc123", pr.HeadSHA)
+	}
+	if pr.LastSeenAt == nil || pr.LastSeenAt.Format(time.RFC3339) != "2026-08-01T11:00:00Z" {
+		t.Fatalf("pr.LastSeenAt = %v, want 2026-08-01T11:00:00Z", pr.LastSeenAt)
 	}
 
 	if n, err := st.CountUnprocessedEvents(context.Background()); err != nil || n != 0 {

@@ -250,7 +250,7 @@ resync（7.5 節）はこの図には現れない。resync は `items` を GitHu
       → 304 なら即終了。rate limit を消費しない
 2. 200 → 更新されたスレッド一覧を得る
 3. 変化したアイテムについてのみ GET /issues/{n}/comments?since=<item.last_seen_at>
-4. actor == bot login のものを捨てる
+4. actor == bot login のもの、および NUAGE_ALLOWED_AUTHORS に含まれない actor のものを捨てる
 5. 残りを events に enqueue し、item.last_seen_at と cursor を更新する
 ```
 
@@ -295,7 +295,7 @@ webhook は配信に失敗しうるし、トンネルは切れるし、notificat
 
 毎時 1 回、全対象リポジトリの open な Issue/PR を走査して次を行う。
 
-- DB に無いアイテムを登録する（**着火はしない**。7.6 節を参照）
+- DB に無いアイテムを登録する（**着火はしない**。`last_seen_at` は Issue/PR 自身の作成日時で初期化する。7.6 節を参照）
 - GitHub 上で close / merge 済みのアイテムを `done` にする
 - `head_sha` の乖離を修正する
 - 期限切れの lease を削除する
@@ -306,11 +306,12 @@ DB が空の状態で起動すると、既存の open Issue すべてが「新�
 着火すると多数のエージェントが同時に走り、コストが跳ねる。
 
 **初めて認識したアイテムは `new` として記録するだけで着火しない。**
+登録時は `last_seen_at` を Issue/PR 自身の作成日時でベースライン設定し、過去の全コメントを一括してイベント化することは避ける。
 着火するのは cursor 以降に発生したイベントを持つアイテムのみである。
 つまり「autopilot を有効にした後に起票された Issue」から動き始める。
 
 既存の Issue を対象にしたい場合は、人間がその Issue にコメントを 1 件書けばよい
-（それがイベントになる）。
+（それがイベントになる。`last_seen_at` 以降の新着コメントとして正常に拾われる）。
 
 ## 8. 遷移とエージェント
 
@@ -503,7 +504,7 @@ clone / 最新化する。これにより作業ディレクトリの兄弟ディ
 | フラグ | 必須/任意 | 用途 |
 | :-- | :-- | :-- |
 | `--repos` | 必須 | 対象リポジトリのカンマ区切りリスト（`owner/name` 形式） |
-| `--allowed-authors` | 任意 | 対象とする Issue/PR 作成者のカンマ区切りリスト。未指定時は `NUAGE_ALLOWED_AUTHORS`、それも無ければ既定値 |
+| `--allowed-authors` | 任意 | 対象とする Issue/PR 作成者、および反応するコメント投稿者のカンマ区切りリスト。未指定時は `NUAGE_ALLOWED_AUTHORS`、それも無ければ既定値 |
 | `--version` | 任意 | バージョンを表示して終了する |
 
 | 変数 | 必須/任意 | 用途 |
