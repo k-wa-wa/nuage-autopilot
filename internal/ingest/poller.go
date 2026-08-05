@@ -261,7 +261,7 @@ func (p *Poller) diffComments(ctx context.Context, item store.Item, kind store.K
 		if c.CreatedAt.After(latest) {
 			latest = c.CreatedAt
 		}
-		if isSelfOrBot(c, botLogin) {
+		if isSelfOrBot(c, botLogin) || !isAllowedAuthor(c.User.Login, p.AllowedAuthors) {
 			continue
 		}
 
