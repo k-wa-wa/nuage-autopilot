@@ -58,6 +58,29 @@ func TestBuildAgent_ResumedSessionMentionsContinuity(t *testing.T) {
 	}
 }
 
+// TestBuildVerify_ReviewsCodeButOnlyBlocksOnObjectiveDefects は、verify が
+// コードレビューも担いつつ、差し戻せる範囲が客観的に示せるものに限定されている
+// ことを検証する（DESIGN.md 8.4 節）。
+//
+// この制約が無いと、LLM は好みの指摘をいくらでも作れてしまい、直しようのない
+// 差し戻しでエージェントが修正を繰り返して予算を焼く。
+func TestBuildVerify_ReviewsCodeButOnlyBlocksOnObjectiveDefects(t *testing.T) {
+	out := BuildVerify(Context{RepoName: "k-wa-wa/pechka", Kind: KindPullRequest, Number: 7, Title: "fix bug"})
+
+	for _, want := range []string{
+		"コードレビュー",
+		"AGENTS.md",
+		"差し戻してよい範囲",
+		"客観的に示せるものだけ",
+		"それを理由に verify_failed にしてはならない",
+		"CI が機械的に判定できるものは CI の責務",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("verify prompt does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestBuildVerify_ProhibitsImplementationAndPrefersInconclusive は verify の
 // 独立性（コードを変更しない）と、迷ったときに不合格へ倒れない指示が
 // プロンプトに含まれることを検証する（DESIGN.md 8.4 節）。
