@@ -65,6 +65,13 @@ nuage-autopilot --repos owner/repo-a,owner/repo-b
 起動した時点で既に存在していた open Issue は、記録されるだけで**着火しない**。
 既存の Issue を処理させたい場合は、その Issue にコメントを 1 件書けばよい。
 
+## ダッシュボード
+
+SQLite の中身（items / events / leases）を読み取り専用で見られる Web ダッシュボードを
+同じバイナリに内蔵している。既定では `http://127.0.0.1:8080` で待ち受ける
+（`--web-addr` / `NUAGE_WEB_ADDR` で変更、`off` で無効化。[DESIGN.md 14章](./DESIGN.md)）。
+認証機構は無いため、外部に公開する場合はリバースプロキシ等を挟むこと。
+
 ## 停止
 
 `SIGTERM` / `SIGINT` で停止する。実行中の claude は停止させ、保持している lease を解放してから
