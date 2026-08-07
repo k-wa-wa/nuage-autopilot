@@ -8,6 +8,9 @@
 // Poller/Resyncer は internal/ingest（DESIGN.md 7章）、Worker は internal/engine
 // （DESIGN.md 8章）がそれぞれ実装する。このファイルの責務は設定の解決と依存の
 // 組み立てだけであり、遷移やイベント取り込みの判断は一切持たない。
+//
+// 加えて、SQLite の中身を読み取り専用で見せる Web ダッシュボード（internal/web、
+// DESIGN.md 14章）を、上記 4 goroutine とは独立したライフサイクルで起動する。
 package main
 
 import (
@@ -19,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"autopilot/internal/config"
@@ -28,6 +32,7 @@ import (
 	"autopilot/internal/ingest"
 	"autopilot/internal/skills"
 	"autopilot/internal/store"
+	"autopilot/internal/web"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で上書きされる想定の値である。
@@ -114,6 +119,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Logger:   logger,
 	})
 
+	// 読み取り専用ダッシュボード（DESIGN.md 14章）は poll/work/resync/watchdog の
+	// 4 goroutine とは独立したライフサイクルで動かす。閲覧機能が落ちても自動化の
+	// 本体を止める理由にはならないため、daemon.Run とは別に起動・待機する。
+	var webWG sync.WaitGroup
+	if cfg.WebAddr != "" {
+		dashboard := web.New(st, logger)
+		webWG.Add(1)
+		go func() {
+			defer webWG.Done()
+			logger.Info("starting read-only web dashboard", "addr", cfg.WebAddr)
+			if err := dashboard.ListenAndServe(ctx, cfg.WebAddr); err != nil {
+				logger.Error("web dashboard exited with error", "error", err.Error())
+			}
+		}()
+	} else {
+		logger.Info("read-only web dashboard disabled")
+	}
+
+	exitCode := 0
 	if err := daemon.Run(ctx, daemon.Config{
 		Logger:   logger,
 		Poller:   poller,
@@ -121,10 +145,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Resyncer: resyncer,
 	}); err != nil {
 		logger.Error("daemon exited with error", "error", err.Error())
-		return 1
+		exitCode = 1
 	}
 
-	return 0
+	webWG.Wait()
+
+	return exitCode
 }
 
 // githubClientOptions は internal/github.Client の生成オプションを組み立てる。

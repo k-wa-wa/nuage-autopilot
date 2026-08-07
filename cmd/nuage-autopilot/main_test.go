@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,6 +70,9 @@ func TestRun_StartsDaemonAndStopsOnSIGTERM(t *testing.T) {
 	t.Setenv("GH_TOKEN", "test-token")
 	t.Setenv("GIT_AUTHOR_NAME", "")
 	t.Setenv("GIT_AUTHOR_EMAIL", "")
+	// このテストはダッシュボードの挙動を検証しない。既定の 127.0.0.1:8080 に
+	// bind すると CI 環境でポート競合により不安定になりうるため無効化する。
+	t.Setenv("NUAGE_WEB_ADDR", "off")
 
 	var stdout, stderr bytes.Buffer
 	var mu sync.Mutex // stdout/stderr への書き込みと読み取りを race 検出器から守る
@@ -126,6 +130,81 @@ func TestRun_StartsDaemonAndStopsOnSIGTERM(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout = %q, want it to contain %q", out, want)
 		}
+	}
+}
+
+// TestRun_ServesReadOnlyDashboardWhenEnabled は --web-addr を指定した場合に
+// run() がダッシュボードを実際に listen させ、応答することを確認する
+// （DESIGN.md 14章: main.go の配線そのものを検証する）。
+func TestRun_ServesReadOnlyDashboardWhenEnabled(t *testing.T) {
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/user":
+			_, _ = w.Write([]byte(`{"login": "nuage-autopilot"}`))
+		case "/notifications":
+			w.WriteHeader(http.StatusNotModified)
+		case "/repos/k-wa-wa/pechka/issues", "/repos/k-wa-wa/pechka/pulls":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(ghServer.Close)
+
+	// 空きポートを 1 つ確保してすぐ閉じ、そのアドレスを --web-addr に渡す
+	// （ポート番号を得るためだけの一時的な listen であり、多少のレース窓は許容する）。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	webAddr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close temporary listener: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	t.Setenv("NUAGE_STATE_DIR", stateDir)
+	t.Setenv("NUAGE_GITHUB_API_BASE_URL", ghServer.URL)
+	t.Setenv("NUAGE_WEB_ADDR", webAddr)
+	t.Setenv("GH_TOKEN", "test-token")
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+
+	var stdout, stderr bytes.Buffer
+	var mu sync.Mutex
+
+	code := make(chan int, 1)
+	go func() {
+		c := run([]string{"--repos", "k-wa-wa/pechka"}, syncWriter{&mu, &stdout}, syncWriter{&mu, &stderr})
+		code <- c
+	}()
+	t.Cleanup(func() {
+		proc, err := os.FindProcess(os.Getpid())
+		if err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+		}
+		<-code
+	})
+
+	var resp *http.Response
+	deadline := time.After(15 * time.Second)
+	for {
+		var reqErr error
+		resp, reqErr = http.Get("http://" + webAddr + "/")
+		if reqErr == nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("dashboard did not become reachable at %s in time: %v", webAddr, reqErr)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", resp.StatusCode)
 	}
 }
 
