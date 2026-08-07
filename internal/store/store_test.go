@@ -219,6 +219,37 @@ func TestListItemsByPhase(t *testing.T) {
 	}
 }
 
+func TestListAllItems_OrdersByUpdatedAtDescending(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	a, _, err := s.UpsertItem(ctx, "k-wa-wa/pechka", 1, KindIssue)
+	if err != nil {
+		t.Fatalf("UpsertItem a: %v", err)
+	}
+	b, _, err := s.UpsertItem(ctx, "k-wa-wa/nuage-workspace", 2, KindPullRequest)
+	if err != nil {
+		t.Fatalf("UpsertItem b: %v", err)
+	}
+
+	// a を後から更新することで updated_at を b より新しくする。
+	if err := s.UpdateItemPhase(ctx, a.ID, PhaseInReview); err != nil {
+		t.Fatalf("UpdateItemPhase: %v", err)
+	}
+
+	got, err := s.ListAllItems(ctx)
+	if err != nil {
+		t.Fatalf("ListAllItems: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	// ダッシュボードは「直近更新されたものを先頭に」表示するため降順であることを確認する。
+	if got[0].ID != a.ID || got[1].ID != b.ID {
+		t.Fatalf("order = [%d, %d], want [%d, %d] (updated_at desc)", got[0].ID, got[1].ID, a.ID, b.ID)
+	}
+}
+
 func TestAddItemUsage_AccumulatesAndResetClearsIt(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -292,6 +323,45 @@ func TestEnqueueEvent_DedupSuppressesDuplicates(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("CountUnprocessedEvents = %d, want 1 (dedup must prevent a second row)", n)
+	}
+}
+
+func TestListEventsByItem_OrdersByCreatedAtAscendingAndScopesToItem(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	a, _, err := s.UpsertItem(ctx, "k-wa-wa/pechka", 1, KindIssue)
+	if err != nil {
+		t.Fatalf("UpsertItem a: %v", err)
+	}
+	other, _, err := s.UpsertItem(ctx, "k-wa-wa/pechka", 2, KindIssue)
+	if err != nil {
+		t.Fatalf("UpsertItem other: %v", err)
+	}
+
+	older := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+
+	if _, _, err := s.EnqueueEvent(ctx, "opened:1", a.ID, "opened", "k-wa-wa", "body", older); err != nil {
+		t.Fatalf("EnqueueEvent (older): %v", err)
+	}
+	if _, _, err := s.EnqueueEvent(ctx, "commented:1", a.ID, "commented", "k-wa-wa", "follow-up", newer); err != nil {
+		t.Fatalf("EnqueueEvent (newer): %v", err)
+	}
+	if _, _, err := s.EnqueueEvent(ctx, "opened:2", other.ID, "opened", "k-wa-wa", "unrelated item", older); err != nil {
+		t.Fatalf("EnqueueEvent (other item): %v", err)
+	}
+
+	got, err := s.ListEventsByItem(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ListEventsByItem: %v", err)
+	}
+	// タイムライン表示のため古い順であることと、他アイテムのイベントが混入しないことを確認する。
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	if got[0].Type != "opened" || got[1].Type != "commented" {
+		t.Fatalf("order = [%s, %s], want [opened, commented] (created_at asc)", got[0].Type, got[1].Type)
 	}
 }
 
