@@ -15,6 +15,15 @@ const DefaultStateDir = "./state"
 // DefaultAllowedAuthors は --allowed-authors / NUAGE_ALLOWED_AUTHORS のいずれも指定されなかった場合の既定値である。
 const DefaultAllowedAuthors = "k-wa-wa,bot-wa-wa"
 
+// DefaultWebAddr は --web-addr / NUAGE_WEB_ADDR のいずれも指定されなかった場合の既定値である。
+// ダッシュボードには認証機構が無いため、既定ではループバックにのみ bind する
+// （外部に公開したい場合は運用側でリバースプロキシ等を挟む。DESIGN.md 14章）。
+const DefaultWebAddr = "127.0.0.1:8080"
+
+// WebAddrOff は --web-addr / NUAGE_WEB_ADDR にこの値を指定すると、読み取り専用
+// ダッシュボードの起動自体を無効化するための予約語である。
+const WebAddrOff = "off"
+
 // Config は 1 回の起動で使用する設定値を保持する。
 type Config struct {
 	// Repos は今回の起動で巡回・チェックする対象リポジトリの一覧（"owner/name" 形式）。
@@ -26,6 +35,11 @@ type Config struct {
 
 	// StateDir はリポジトリの clone やサイクルの作業状態を置くディレクトリである。
 	StateDir string
+
+	// WebAddr は読み取り専用ダッシュボード（internal/web）の listen アドレスである。
+	// 空文字列の場合はダッシュボードを起動しない（--web-addr/NUAGE_WEB_ADDR に
+	// WebAddrOff を指定した場合にこうなる）。
+	WebAddr string
 
 	// ShowVersion が true の場合、呼び出し側はバージョンを表示して即座に終了する。
 	ShowVersion bool
@@ -59,6 +73,7 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("nuage-autopilot", flag.ContinueOnError)
 	reposStr := fs.String("repos", "", "巡回処理対象のリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-workspace)")
 	allowedAuthorsStr := fs.String("allowed-authors", resolveEnvOrDefault("NUAGE_ALLOWED_AUTHORS", DefaultAllowedAuthors), "候補対象とする Issue/PR の作成者一覧 (カンマ区切り)")
+	webAddrStr := fs.String("web-addr", resolveEnvOrDefault("NUAGE_WEB_ADDR", DefaultWebAddr), "読み取り専用ダッシュボードの listen アドレス（無効化するには \"off\" を指定）")
 	showVersion := fs.Bool("version", false, "バージョンを表示して終了する")
 
 	if err := fs.Parse(args); err != nil {
@@ -68,10 +83,16 @@ func Parse(args []string) (Config, error) {
 	repos := parseCommaList(*reposStr)
 	allowedAuthors := parseCommaList(*allowedAuthorsStr)
 
+	webAddr := *webAddrStr
+	if webAddr == WebAddrOff {
+		webAddr = ""
+	}
+
 	cfg := Config{
 		Repos:          repos,
 		AllowedAuthors: allowedAuthors,
 		StateDir:       resolveStateDir(),
+		WebAddr:        webAddr,
 		ShowVersion:    *showVersion,
 	}
 
