@@ -1,0 +1,58 @@
+{{define "content"}}
+<section class="summary">
+  {{range .PhaseCounts}}
+  <a class="stat phase-{{.Phase}}{{if eq $.FilterPhase (print .Phase)}} active{{end}}" href="{{.Href}}">
+    <span class="stat-count">{{.Count}}</span>
+    <span class="stat-label">{{.Label}}</span>
+  </a>
+  {{end}}
+</section>
+
+<section class="filters">
+  <form method="get" action="/">
+    <label>
+      repo
+      <select name="repo" onchange="this.form.submit()">
+        <option value="">すべて</option>
+        {{range .Repos}}
+        <option value="{{.}}" {{if eq $.FilterRepo .}}selected{{end}}>{{.}}</option>
+        {{end}}
+      </select>
+    </label>
+    {{if .FilterPhase}}<input type="hidden" name="phase" value="{{.FilterPhase}}">{{end}}
+    {{if or .FilterPhase .FilterRepo}}<a class="clear" href="/">絞り込み解除</a>{{end}}
+  </form>
+  <p class="count">{{.VisibleCount}} / {{.TotalItems}} 件を表示（生成: {{formatTime .GeneratedAt}}）</p>
+</section>
+
+<table class="items">
+  <thead>
+    <tr>
+      <th>repo</th>
+      <th>#</th>
+      <th>種別</th>
+      <th>phase</th>
+      <th>実行中</th>
+      <th>コスト</th>
+      <th>実行回数</th>
+      <th>更新</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Items}}
+    <tr>
+      <td class="repo">{{.Item.Repo}}</td>
+      <td><a href="{{itemHref .Item.Repo .Item.Number}}">#{{.Item.Number}}</a></td>
+      <td>{{kindLabel .Item.Kind}}</td>
+      <td><span class="badge phase-{{.Item.Phase}}">{{phaseLabel .Item.Phase}}</span></td>
+      <td>{{if .LeaseHolder}}<span class="lease-active">● {{.LeaseHolder}}</span>{{else}}—{{end}}</td>
+      <td>{{money .Item.CostUSD}}</td>
+      <td>{{.Item.Runs}}</td>
+      <td title="{{formatTime .Item.UpdatedAt}}">{{ago $.Now .Item.UpdatedAt}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="8" class="empty">該当するアイテムが無い</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
