@@ -45,6 +45,40 @@ func TestParse_StateDirFromEnv(t *testing.T) {
 	}
 }
 
+func TestParse_WebAddrDefault(t *testing.T) {
+	t.Setenv("NUAGE_WEB_ADDR", "")
+
+	cfg, err := Parse([]string{"--repos", "k-wa-wa/pechka"})
+	if err != nil {
+		t.Fatalf("Parse unexpected error: %v", err)
+	}
+	if cfg.WebAddr != DefaultWebAddr {
+		t.Fatalf("cfg.WebAddr = %q, want %q", cfg.WebAddr, DefaultWebAddr)
+	}
+}
+
+func TestParse_WebAddrOffDisablesDashboard(t *testing.T) {
+	cfg, err := Parse([]string{"--repos", "k-wa-wa/pechka", "--web-addr", "off"})
+	if err != nil {
+		t.Fatalf("Parse unexpected error: %v", err)
+	}
+	if cfg.WebAddr != "" {
+		t.Fatalf("cfg.WebAddr = %q, want \"\" (off means disabled)", cfg.WebAddr)
+	}
+}
+
+func TestParse_WebAddrFromEnv(t *testing.T) {
+	t.Setenv("NUAGE_WEB_ADDR", "0.0.0.0:9090")
+
+	cfg, err := Parse([]string{"--repos", "k-wa-wa/pechka"})
+	if err != nil {
+		t.Fatalf("Parse unexpected error: %v", err)
+	}
+	if cfg.WebAddr != "0.0.0.0:9090" {
+		t.Fatalf("cfg.WebAddr = %q, want %q", cfg.WebAddr, "0.0.0.0:9090")
+	}
+}
+
 func TestMissingEnv_ReportsUnsetRequiredVars(t *testing.T) {
 	t.Setenv("GH_TOKEN", "")
 	t.Setenv("GIT_AUTHOR_NAME", "nuage-autopilot")

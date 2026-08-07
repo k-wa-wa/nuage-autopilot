@@ -61,6 +61,32 @@ func (s *Store) MarkEventProcessed(ctx context.Context, id int64) error {
 	return requireRowsAffected(res, "event", id)
 }
 
+// ListEventsByItem は itemID に属するイベントを created_at 昇順（古い順）で返す。
+// 読み取り専用ダッシュボード（internal/web）がアイテム詳細のタイムライン表示に使う。
+func (s *Store) ListEventsByItem(ctx context.Context, itemID int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+eventColumns+` FROM events WHERE item_id = ? ORDER BY created_at ASC, id ASC`, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list events for item %d: %w", itemID, err)
+	}
+	defer rows.Close()
+
+	var out []Event
+	for rows.Next() {
+		ev, ok, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, ev)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate events for item %d: %w", itemID, err)
+	}
+	return out, nil
+}
+
 // CountUnprocessedEvents は未処理イベントの件数を返す。デーモンの生存確認・ログ用。
 func (s *Store) CountUnprocessedEvents(ctx context.Context) (int, error) {
 	var n int

@@ -1,0 +1,84 @@
+{{define "content"}}
+<p class="breadcrumb"><a href="/">← 一覧に戻る</a></p>
+
+<section class="item-header">
+  <h1>
+    {{.Item.Repo}}
+    <a href="{{githubHref .Item.Repo .Item.Kind .Item.Number}}">#{{.Item.Number}}</a>
+  </h1>
+  <span class="badge phase-{{.Item.Phase}}">{{phaseLabel .Item.Phase}}</span>
+  <span class="kind">{{kindLabel .Item.Kind}}</span>
+</section>
+
+<section class="item-meta">
+  <dl>
+    <dt>lease</dt>
+    <dd>
+      {{if .Lease}}
+        {{if (.Now.Before .Lease.ExpiresAt)}}
+          <span class="lease-active">● {{.Lease.Holder}} が処理中（{{formatTime .Lease.ExpiresAt}} まで）</span>
+        {{else}}
+          <span class="lease-expired">期限切れ（{{.Lease.Holder}}, {{formatTime .Lease.ExpiresAt}}）</span>
+        {{end}}
+      {{else}}
+        なし
+      {{end}}
+    </dd>
+
+    <dt>コスト</dt>
+    <dd>
+      {{money .Item.CostUSD}} / {{money .BudgetMaxCost}}
+      <span class="bar"><span class="bar-fill" style="width: {{printf "%.0f" (mul .BudgetCostRatio 100.0)}}%"></span></span>
+    </dd>
+
+    <dt>実行回数</dt>
+    <dd>
+      {{.Item.Runs}} / {{.BudgetMaxRuns}}
+      <span class="bar"><span class="bar-fill" style="width: {{printf "%.0f" (mul .BudgetRunsRatio 100.0)}}%"></span></span>
+    </dd>
+
+    <dt>session_id</dt>
+    <dd>{{if .Item.SessionID}}<code>{{.Item.SessionID}}</code>{{else}}—{{end}}</dd>
+
+    <dt>head_sha</dt>
+    <dd>{{if .Item.HeadSHA}}<code>{{.Item.HeadSHA}}</code>{{else}}—{{end}}</dd>
+
+    <dt>最終確認</dt>
+    <dd>{{if .Item.LastSeenAt}}{{formatTime .Item.LastSeenAt}}{{else}}—{{end}}</dd>
+
+    <dt>更新</dt>
+    <dd>{{formatTime .Item.UpdatedAt}}（{{ago .Now .Item.UpdatedAt}}）</dd>
+
+    {{if .Parent}}
+    <dt>親アイテム</dt>
+    <dd><a href="{{itemHref .Parent.Repo .Parent.Number}}">{{.Parent.Repo}}#{{.Parent.Number}}</a></dd>
+    {{end}}
+
+    {{if .Children}}
+    <dt>子アイテム</dt>
+    <dd>
+      {{range .Children}}
+        <a href="{{itemHref .Repo .Number}}">{{.Repo}}#{{.Number}} ({{phaseLabel .Phase}})</a><br>
+      {{end}}
+    </dd>
+    {{end}}
+  </dl>
+</section>
+
+<section class="timeline">
+  <h2>タイムライン</h2>
+  <ol>
+    {{range .Events}}
+    <li class="event {{if .ProcessedAt}}processed{{else}}pending{{end}}">
+      <span class="event-type">{{eventLabel .Type}}</span>
+      <span class="event-actor">{{.Actor}}</span>
+      <time title="{{formatTime .CreatedAt}}">{{ago $.Now .CreatedAt}}</time>
+      {{if not .ProcessedAt}}<span class="pending-badge">未処理</span>{{end}}
+      {{if .Body}}<pre class="event-body">{{.Body}}</pre>{{end}}
+    </li>
+    {{else}}
+    <li class="empty">イベントが無い</li>
+    {{end}}
+  </ol>
+</section>
+{{end}}

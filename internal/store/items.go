@@ -82,6 +82,17 @@ func (s *Store) ListItemsByRepo(ctx context.Context, repo string) ([]Item, error
 	return scanItems(rows)
 }
 
+// ListAllItems は追跡中の全アイテムを updated_at 降順（新しい順）で返す。
+// 読み取り専用ダッシュボード（internal/web）が一覧表示に使う。
+func (s *Store) ListAllItems(ctx context.Context) ([]Item, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+itemColumns+` FROM items ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list all items: %w", err)
+	}
+	defer rows.Close()
+	return scanItems(rows)
+}
+
 // ListChildren は parentID を親とするアイテムを返す。
 func (s *Store) ListChildren(ctx context.Context, parentID int64) ([]Item, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+itemColumns+` FROM items WHERE parent_id = ? ORDER BY id ASC`, parentID)
