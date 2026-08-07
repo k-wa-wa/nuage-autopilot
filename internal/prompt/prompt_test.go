@@ -58,6 +58,30 @@ func TestBuildAgent_ResumedSessionMentionsContinuity(t *testing.T) {
 	}
 }
 
+// TestBuildVerify_ProhibitsImplementationAndPrefersInconclusive は verify の
+// 独立性（コードを変更しない）と、迷ったときに不合格へ倒れない指示が
+// プロンプトに含まれることを検証する（DESIGN.md 8.4 節）。
+func TestBuildVerify_ProhibitsImplementationAndPrefersInconclusive(t *testing.T) {
+	out := BuildVerify(Context{RepoName: "k-wa-wa/pechka", Kind: KindPullRequest, Number: 7, Title: "fix bug"})
+
+	for _, want := range []string{
+		"コードの変更・commit・push",
+		"approve / merge",
+		"verify_inconclusive",
+		".agents/verify.md",
+		"pull_request #7",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("verify prompt does not mention %q:\n%s", want, out)
+		}
+	}
+
+	// 実装側の outcome を verify に名乗らせない。
+	if strings.Contains(out, `"implemented"`) {
+		t.Fatalf("verify prompt must not offer the agent outcomes:\n%s", out)
+	}
+}
+
 func TestBuildAgent_ProhibitsUnsafeOperations(t *testing.T) {
 	out := BuildAgent(Context{RepoName: "k-wa-wa/pechka", Kind: KindIssue, Number: 1, Title: "t"})
 

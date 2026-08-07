@@ -25,6 +25,11 @@ claude を起動する。**イベントが無ければ LLM も GitHub API もほ
 `NUAGE_REPORT_FILE` に JSON で残す。Go 側はそれを見て状態を進めるだけで、何をするかは
 判断しない。詳細は [DESIGN.md](./DESIGN.md) を参照。
 
+CI が緑になった PR は、続けて **verify** が検証する。verify はコードを変更しない別セッションで、
+プレビュー環境を実際に叩いて要求どおり動いているかを確かめ、問題があれば PR にコメントして
+エージェントに差し戻す。何をもって合格とするかは、対象リポジトリの `.agents/verify.md` に書く
+（無い場合、verify は判定を出さず PR をそのまま通す）。詳細は [DESIGN.md 8.4 節](./DESIGN.md)。
+
 ## 必要なもの
 
 - `claude` CLI が実行ユーザーで認証済みであること（`~/.claude` などの CLI 側の設定を使う）

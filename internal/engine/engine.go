@@ -10,6 +10,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,8 +28,21 @@ const (
 	defaultLeaseTTL     = 130 * time.Minute
 	defaultAgentTimeout = 120 * time.Minute
 	defaultMaxCostUSD   = 5.0
-	defaultMaxRuns      = 10
+	defaultMaxRuns      = 16
+
+	// verifyTimeout は verify 1 回の実行に許す最大時間である。verify は実装を伴わない
+	// 読み取り専用の検証であり、エージェント本体ほどの時間を必要としないため、
+	// AgentTimeout とは別に短く固定する。
+	verifyTimeout = 30 * time.Minute
 )
+
+// errLeaseHeld は、対象アイテムのリースを他の保持者が握っているため今回は
+// 処理できなかったことを表す番兵エラーである。
+//
+// これを通常のエラーと区別するのは、イベントを処理済みにしてよいかが変わるためである。
+// プロセスがクラッシュすると解放されなかったリースが TTL 切れまで残る。その間に
+// 届いたイベントを処理済みにしてしまうと、作業が恒久的に失われる（DESIGN.md 11章）。
+var errLeaseHeld = errors.New("lease is held by another holder")
 
 // Config は Engine の生成に必要な設定である。
 type Config struct {
@@ -57,7 +71,7 @@ type Config struct {
 	AgentTimeout time.Duration
 
 	// MaxCostUSD / MaxRuns は 1 アイテムあたりの予算上限である
-	// （DESIGN.md 10章。既定 $5 / 10 runs）。
+	// （DESIGN.md 10章。既定 $5 / 16 runs）。
 	MaxCostUSD float64
 	MaxRuns    int
 
@@ -137,6 +151,14 @@ func (e *Engine) ProcessNext(ctx context.Context) (bool, error) {
 	if !ok {
 		e.logger().Error("event references a missing item; discarding", "event_id", ev.ID, "item_id", ev.ItemID)
 	} else if err := e.handle(ctx, item, ev); err != nil {
+		if errors.Is(err, errLeaseHeld) {
+			// イベントを未処理のまま残し、次の起床で再試行する。processed=false を
+			// 返すことで worker ループはタイマー待ちに入り、忙しくループしない。
+			// リースは TTL で必ず失効するため、この待ちは有限である。
+			e.logger().Warn("lease is held; leaving the event unprocessed for a later retry",
+				"event_id", ev.ID, "repo", item.Repo, "number", item.Number)
+			return false, nil
+		}
 		e.logger().Error("failed to handle event",
 			"event_id", ev.ID, "item_id", ev.ItemID, "repo", item.Repo, "number", item.Number, "error", err.Error())
 	}
@@ -170,8 +192,8 @@ func (e *Engine) handle(ctx context.Context, item store.Item, ev store.Event) er
 	case actionToDone:
 		return e.markDone(ctx, item)
 
-	case actionToReady:
-		return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseReady)
+	case actionLaunchVerify:
+		return e.launchVerify(ctx, item, ev)
 
 	case actionToInReviewAndLaunch:
 		if err := e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseInReview); err != nil {
@@ -221,8 +243,27 @@ func (e *Engine) markDone(ctx context.Context, item store.Item) error {
 	return nil
 }
 
-// launchAgent は予算とリースを確認した上でエージェントを起動する。
+// launchAgent は予算とリースを確認した上で実装エージェントを起動する。
 func (e *Engine) launchAgent(ctx context.Context, item store.Item, ev store.Event, newSession bool) error {
+	return e.withBudgetAndLease(ctx, item, ev, e.cfg.AgentTimeout, func(runCtx context.Context, it store.Item) error {
+		return e.runAgent(runCtx, it, ev, newSession)
+	})
+}
+
+// launchVerify は予算とリースを確認した上で verify を起動する（DESIGN.md 8.4 節）。
+//
+// verify の実行も予算（CostUSD / Runs）に加算する。「1 アイテムに費やしてよい総額」を
+// 一本で管理する DESIGN.md 10章の思想を崩さないためであり、実装と検証が延々と往復した
+// 場合の打ち止めもこの一本の上限が担う。
+func (e *Engine) launchVerify(ctx context.Context, item store.Item, ev store.Event) error {
+	return e.withBudgetAndLease(ctx, item, ev, verifyTimeout, func(runCtx context.Context, it store.Item) error {
+		return e.runVerify(runCtx, it, ev)
+	})
+}
+
+// withBudgetAndLease は予算とリースを確認した上で fn を実行する、agent と verify に
+// 共通の前処理である。リースを取得できなかった場合は errLeaseHeld を返す。
+func (e *Engine) withBudgetAndLease(ctx context.Context, item store.Item, ev store.Event, timeout time.Duration, fn func(context.Context, store.Item) error) error {
 	if isHumanEventType(ev.Type) {
 		// 人間の関与が唯一の脱出口である、というモデルを反映する（DESIGN.md 10章）。
 		if err := e.cfg.Store.ResetItemBudget(ctx, item.ID); err != nil {
@@ -248,10 +289,10 @@ func (e *Engine) launchAgent(ctx context.Context, item store.Item, ev store.Even
 		return fmt.Errorf("acquire lease: %w", err)
 	}
 	if !acquired {
-		// worker は直列実行のため通常は起こらないが、防御的に扱う。
-		e.logger().Warn("lease already held by another holder; skipping this launch",
-			"repo", item.Repo, "number", item.Number)
-		return nil
+		// worker は直列実行のため、同一プロセス内では起こらない。到達するのは
+		// 前のプロセスがクラッシュしてリースが残っている場合であり、そのときは
+		// イベントを消費せずに再試行させる必要がある（errLeaseHeld の説明を参照）。
+		return errLeaseHeld
 	}
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -261,10 +302,10 @@ func (e *Engine) launchAgent(ctx context.Context, item store.Item, ev store.Even
 		}
 	}()
 
-	runCtx, cancel := context.WithTimeout(ctx, e.cfg.AgentTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	return e.runAgent(runCtx, item, ev, newSession)
+	return fn(runCtx, item)
 }
 
 // runAgent は実際に claude を起動し、結果を適用する。
@@ -274,12 +315,140 @@ func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, 
 		return e.reportBlocked(ctx, item, fmt.Sprintf("GitHub からの情報取得に失敗した: %s", err.Error()))
 	}
 
-	workDir, err := repo.EnsureWorkspace(ctx, e.logger(), e.cfg.StateDir, item.Repo, e.cfg.Repos, e.cfg.RepoOptions...)
+	promptText := prompt.BuildAgent(promptContext(item, ev, detail, newSession))
+
+	run, err := e.runClaude(ctx, item, promptText, item.SessionID)
 	if err != nil {
-		return e.reportBlocked(ctx, item, fmt.Sprintf("作業ディレクトリの準備に失敗した: %s", err.Error()))
+		return e.reportBlocked(ctx, item, fmt.Sprintf("エージェントの実行に失敗した: %s", err.Error()))
+	}
+	defer run.cleanup()
+
+	if run.meta.SessionID != "" && run.meta.SessionID != item.SessionID {
+		if err := e.cfg.Store.UpdateItemSessionID(ctx, item.ID, run.meta.SessionID); err != nil {
+			e.logger().Error("failed to persist session id", "repo", item.Repo, "number", item.Number, "error", err.Error())
+		}
 	}
 
-	promptText := prompt.BuildAgent(prompt.Context{
+	res, readErr := readAgentResult(run.reportPath)
+	if readErr != nil {
+		return e.reportBlocked(ctx, item, fmt.Sprintf("エージェントが有効な結果を報告しなかった（exit_code=%d, 読み取りエラー: %s）",
+			run.exitCode, readErr.Error()))
+	}
+
+	return e.applyOutcome(ctx, item, res)
+}
+
+// runVerify は verify セッションを起動し、判定を適用する（DESIGN.md 8.4 節）。
+//
+// runAgent との違いは次の 2 点だけであり、いずれも verify の独立性を保つためである。
+//   - セッションを --resume しない。実装したエージェントの思考過程を引き継ぐと、
+//     自分の実装を自分でレビューする形に退化する
+//   - 返ってきた session_id を保存しない。verify は毎回まっさらな状態から検証する
+func (e *Engine) runVerify(ctx context.Context, item store.Item, ev store.Event) error {
+	detail, err := fetchDetail(ctx, e.cfg.Client, item.Repo, item.Kind, item.Number)
+	if err != nil {
+		return e.reportVerifyUnavailable(ctx, item, fmt.Sprintf("GitHub からの情報取得に失敗した: %s", err.Error()))
+	}
+
+	promptText := prompt.BuildVerify(promptContext(item, ev, detail, true))
+
+	run, err := e.runClaude(ctx, item, promptText, "")
+	if err != nil {
+		return e.reportVerifyUnavailable(ctx, item, fmt.Sprintf("verify を起動できなかった: %s", err.Error()))
+	}
+	defer run.cleanup()
+
+	res, readErr := readVerifyResult(run.reportPath)
+	if readErr != nil {
+		return e.reportVerifyUnavailable(ctx, item, fmt.Sprintf("verify が有効な結果を報告しなかった（exit_code=%d, 読み取りエラー: %s）",
+			run.exitCode, readErr.Error()))
+	}
+
+	return e.applyVerifyOutcome(ctx, item, res)
+}
+
+// reportVerifyUnavailable は verify そのものを実行できなかった場合の共通処理である。
+//
+// agent 側の同種の失敗（reportBlocked）と違い、blocked にせず ready へ進める。
+// verify を有効にしたせいで、無効なら ready に進んでいたはずの PR が詰まる状況を
+// 作らないためである。エージェントが判定を出せなかった verify_inconclusive と
+// 実質的に同じ扱いであり、「判定が無い」を「不合格」に読み替えない
+// （DESIGN.md 8.4 節）。
+//
+// 判定が無いまま ready に進む経路が存在するため、将来 auto-merge を実装する場合は
+// `ready` を「検証済み」と解釈してはならない。明示的な verify_passed を根拠にすること。
+func (e *Engine) reportVerifyUnavailable(ctx context.Context, item store.Item, message string) error {
+	e.logger().Error("verify could not produce a verdict; moving to ready without verification",
+		"repo", item.Repo, "number", item.Number, "reason", message)
+	if err := e.cfg.Client.CreateComment(ctx, item.Repo, item.Number, "verify を実行できなかったため、検証されないまま次に進む。"+message); err != nil {
+		e.logger().Error("failed to post verify-unavailable comment", "repo", item.Repo, "number", item.Number, "error", err.Error())
+	}
+	return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseReady)
+}
+
+// claudeRun は claude 1 回の実行結果である。reportPath の後始末は cleanup が行う。
+type claudeRun struct {
+	meta       claudeMeta
+	reportPath string
+	exitCode   int
+	cleanup    func()
+}
+
+// runClaude は agent と verify に共通する起動手順（作業ディレクトリの用意 →
+// report ファイルの作成 → claude の起動 → 実測コストの計上）をまとめたものである。
+//
+// この関数はモードを知らない。モードによる差はプロンプトと resumeSessionID の
+// 有無だけであり、それらは呼び出し側が決める（DESIGN.md 8.4 節）。
+func (e *Engine) runClaude(ctx context.Context, item store.Item, promptText, resumeSessionID string) (claudeRun, error) {
+	workDir, err := repo.EnsureWorkspace(ctx, e.logger(), e.cfg.StateDir, item.Repo, e.cfg.Repos, e.cfg.RepoOptions...)
+	if err != nil {
+		return claudeRun{}, fmt.Errorf("作業ディレクトリの準備: %w", err)
+	}
+
+	reportFile, err := os.CreateTemp(e.cfg.StateDir, "nuage-report-*.json")
+	if err != nil {
+		return claudeRun{}, fmt.Errorf("create report file: %w", err)
+	}
+	reportPath := reportFile.Name()
+	_ = reportFile.Close()
+	cleanup := func() { os.Remove(reportPath) }
+
+	opts := runner.Options{
+		Command:   e.cfg.AgentCommand,
+		WorkDir:   workDir,
+		Prompt:    promptText,
+		ExtraArgs: []string{"--output-format", "json"},
+		ExtraEnv:  []string{"NUAGE_REPORT_FILE=" + reportPath},
+		Logger:    e.logger(),
+	}
+	if resumeSessionID != "" {
+		opts.ExtraArgs = append(opts.ExtraArgs, "--resume", resumeSessionID)
+	}
+
+	result, runErr := runner.Run(ctx, opts)
+	if runErr != nil {
+		cleanup()
+		return claudeRun{}, fmt.Errorf("claude の起動: %w", runErr)
+	}
+
+	meta, metaErr := parseClaudeMeta(result.Stdout)
+	if metaErr != nil {
+		// --output-format json を指定している以上、通常はここに来ない。
+		// コスト計上・セッション継続ができないだけで実行自体は成功しているため、
+		// ログに残して処理は続ける。
+		e.logger().Warn("failed to parse claude's json output; cost and session id were not recorded",
+			"repo", item.Repo, "number", item.Number, "error", metaErr.Error())
+	}
+	if err := e.cfg.Store.AddItemUsage(ctx, item.ID, meta.TotalCostUSD); err != nil {
+		e.logger().Error("failed to record usage", "repo", item.Repo, "number", item.Number, "error", err.Error())
+	}
+
+	return claudeRun{meta: meta, reportPath: reportPath, exitCode: result.ExitCode, cleanup: cleanup}, nil
+}
+
+// promptContext は agent / verify 共通のプロンプト入力を組み立てる。
+func promptContext(item store.Item, ev store.Event, detail itemDetail, newSession bool) prompt.Context {
+	return prompt.Context{
 		RepoName: item.Repo,
 		Kind:     prompt.Kind(item.Kind),
 		Number:   item.Number,
@@ -292,57 +461,41 @@ func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, 
 			CreatedAt: ev.CreatedAt,
 		},
 		NewSession: newSession,
-	})
-
-	reportFile, err := os.CreateTemp(e.cfg.StateDir, "nuage-report-*.json")
-	if err != nil {
-		return fmt.Errorf("create report file: %w", err)
 	}
-	reportPath := reportFile.Name()
-	_ = reportFile.Close()
-	defer os.Remove(reportPath)
+}
 
-	opts := runner.Options{
-		Command:   e.cfg.AgentCommand,
-		WorkDir:   workDir,
-		Prompt:    promptText,
-		ExtraArgs: []string{"--output-format", "json"},
-		ExtraEnv:  []string{"NUAGE_REPORT_FILE=" + reportPath},
-		Logger:    e.logger(),
-	}
-	if item.SessionID != "" {
-		opts.ExtraArgs = append(opts.ExtraArgs, "--resume", item.SessionID)
-	}
+// verifyFailureNote は verify_failure イベントの body である。
+//
+// 差し戻し理由そのものは機械チャネルに載せず、PR コメント（人間チャネル）に置く
+// （DESIGN.md 8.2 節）。イベントはその所在を指すだけに留める。
+const verifyFailureNote = `verify が検証を行い、不合格と判断した。PR に投稿された verify のコメントを読み、
+指摘に対応すること。対応後に push すれば CI と verify が再度走る。`
 
-	result, runErr := runner.Run(ctx, opts)
-	if runErr != nil {
-		return e.reportBlocked(ctx, item, fmt.Sprintf("claude の起動に失敗した: %s", runErr.Error()))
+// applyVerifyOutcome は verify の判定を適用する（DESIGN.md 8.4 節）。
+//
+// verify_failed 以外（verify_passed / verify_inconclusive）はいずれも ready に進める。
+// inconclusive を止めないのは、検証手段が無い・プレビューに到達できないといった
+// 「検証できなかった」を理由に PR を詰まらせないためである。これにより verify を
+// 有効化しても、導入前より悪くなることが構造的に起こらない。
+func (e *Engine) applyVerifyOutcome(ctx context.Context, item store.Item, res agentResult) error {
+	if res.Outcome != OutcomeVerifyFailed {
+		return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseReady)
 	}
 
-	meta, metaErr := parseClaudeMeta(result.Stdout)
-	if metaErr != nil {
-		// --output-format json を指定している以上、通常はここに来ない。
-		// コスト計上・セッション継続ができないだけで実行自体は成功しているため、
-		// ログに残して処理は続ける。
-		e.logger().Warn("failed to parse claude's json output; cost and session id were not recorded",
-			"repo", item.Repo, "number", item.Number, "error", metaErr.Error())
+	// 差し戻しは phase を止めるのではなく、agent を起こし直すイベントとして表現する。
+	// これにより「1 イベント = 高々 1 回の LLM 起動」という不変条件が保たれ、予算も
+	// 起動ごとに正しく積算される（markDone が child_done を積むのと同じ手法である）。
+	//
+	// dedup_key に head_sha を含めるのは、プロセスがクラッシュして ci_success が
+	// 再処理された場合に verify_failure が二重に積まれないようにするためである。
+	// 同じコミットに対する verify の結論は同じであり、2 度目は積む必要が無い。
+	dedupKey := fmt.Sprintf("verify_failure:%s#%d:%s", item.Repo, item.Number, item.HeadSHA)
+	if _, _, err := e.cfg.Store.EnqueueEvent(ctx, dedupKey, item.ID, "verify_failure", "nuage-autopilot", verifyFailureNote, time.Now()); err != nil {
+		return fmt.Errorf("enqueue verify_failure: %w", err)
 	}
-	if meta.SessionID != "" && meta.SessionID != item.SessionID {
-		if err := e.cfg.Store.UpdateItemSessionID(ctx, item.ID, meta.SessionID); err != nil {
-			e.logger().Error("failed to persist session id", "repo", item.Repo, "number", item.Number, "error", err.Error())
-		}
-	}
-	if err := e.cfg.Store.AddItemUsage(ctx, item.ID, meta.TotalCostUSD); err != nil {
-		e.logger().Error("failed to record usage", "repo", item.Repo, "number", item.Number, "error", err.Error())
-	}
-
-	res, readErr := readAgentResult(reportPath)
-	if readErr != nil {
-		return e.reportBlocked(ctx, item, fmt.Sprintf("エージェントが有効な結果を報告しなかった（exit_code=%d, 読み取りエラー: %s）",
-			result.ExitCode, readErr.Error()))
-	}
-
-	return e.applyOutcome(ctx, item, res)
+	// phase は in_review のまま据え置く。次の tick で verify_failure を拾い、
+	// agent が --resume で起動される。
+	return nil
 }
 
 // applyOutcome はエージェントの報告（outcome）に応じて phase を遷移させる

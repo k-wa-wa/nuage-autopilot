@@ -23,7 +23,8 @@ func TestNextAction(t *testing.T) {
 		{"blocked+commented resumes", store.PhaseBlocked, "commented", actionLaunchResume},
 
 		{"in_review+ci_failure resumes", store.PhaseInReview, "ci_failure", actionLaunchResume},
-		{"in_review+ci_success moves to ready", store.PhaseInReview, "ci_success", actionToReady},
+		{"in_review+ci_success launches verify", store.PhaseInReview, "ci_success", actionLaunchVerify},
+		{"in_review+verify_failure resumes the implementing agent", store.PhaseInReview, "verify_failure", actionLaunchResume},
 		{"in_review+commented resumes", store.PhaseInReview, "commented", actionLaunchResume},
 		{"in_review+reviewed resumes", store.PhaseInReview, "reviewed", actionLaunchResume},
 
@@ -31,6 +32,7 @@ func TestNextAction(t *testing.T) {
 		{"ready+reviewed resumes", store.PhaseReady, "reviewed", actionLaunchResume},
 		{"ready+ci_failure returns to in_review and launches", store.PhaseReady, "ci_failure", actionToInReviewAndLaunch},
 		{"ready+ci_success is ignored", store.PhaseReady, "ci_success", actionIgnore},
+		{"ready+verify_failure is ignored (verify only runs from in_review)", store.PhaseReady, "verify_failure", actionIgnore},
 
 		{"delegated+child_done resumes", store.PhaseDelegated, "child_done", actionLaunchResume},
 		{"delegated+commented is ignored (parent does not act directly while delegated)", store.PhaseDelegated, "commented", actionIgnore},
