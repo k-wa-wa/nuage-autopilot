@@ -59,8 +59,8 @@ func TestBuildAgent_ResumedSessionMentionsContinuity(t *testing.T) {
 }
 
 // TestBuildVerify_ReviewsCodeButOnlyBlocksOnObjectiveDefects は、verify が
-// コードレビューも担いつつ、差し戻せる範囲が客観的に示せるものに限定されている
-// ことを検証する（DESIGN.md 8.4 節）。
+// コードレビューも担いつつ（DESIGN.md 8.4 節）、差し戻せる範囲が客観的に示せるものに
+// 限定されていることを検証する。
 //
 // この制約が無いと、LLM は好みの指摘をいくらでも作れてしまい、直しようのない
 // 差し戻しでエージェントが修正を繰り返して予算を焼く。

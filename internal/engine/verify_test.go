@@ -107,7 +107,7 @@ func TestProcessNext_VerifyInconclusiveMovesToReady(t *testing.T) {
 
 // TestProcessNext_VerifyFailedKeepsInReviewAndEnqueuesVerifyFailure は
 // 不合格が phase を止めるのではなく、agent を起こし直すイベントとして表現される
-// ことを検証する（DESIGN.md 8.4 節）。
+// ことを検証する（DESIGN.md 8.1 / 8.3 節）。
 func TestProcessNext_VerifyFailedKeepsInReviewAndEnqueuesVerifyFailure(t *testing.T) {
 	claude := writeFakeClaude(t, `{"outcome": "verify_failed"}`, "verify-sess", 0.1)
 	h := newTestEngine(t, prDetailHandler(t), claude)
@@ -164,7 +164,7 @@ func TestProcessNext_VerifyFailureIsNotEnqueuedTwiceForSameSHA(t *testing.T) {
 
 // TestProcessNext_VerifyDoesNotPersistSessionID は verify のセッションが
 // アイテムに保存されないことを検証する。保存してしまうと次回の実装エージェントが
-// verify のセッションを --resume してしまい、第三者性が失われる（DESIGN.md 8.4 節）。
+// verify のセッションを --resume してしまい、第三者性が失われる。
 func TestProcessNext_VerifyDoesNotPersistSessionID(t *testing.T) {
 	claude := writeFakeClaude(t, `{"outcome": "verify_passed"}`, "verify-sess", 0.25)
 	h := newTestEngine(t, prDetailHandler(t), claude)

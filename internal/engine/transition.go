@@ -56,8 +56,8 @@ func nextAction(phase store.Phase, eventType string) action {
 	case store.PhaseInReview:
 		switch eventType {
 		// verify_failure は verify の差し戻しを表す合成イベントである。人間の指摘
-		// （commented）とまったく同じ扱いで agent を起こす。差し戻し理由は PR
-		// コメントとして GitHub 側に置かれている（DESIGN.md 8.4 節）。
+		// （commented）とまったく同じ扱いで agent を起こす。差し戻し理由はイベントに
+		// 載せず、PR コメントとして GitHub 側に置く（DESIGN.md 8.2 節）。
 		case "ci_failure", "commented", "reviewed", "verify_failure":
 			return actionLaunchResume
 		case "ci_success":

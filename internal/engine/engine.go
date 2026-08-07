@@ -250,7 +250,7 @@ func (e *Engine) launchAgent(ctx context.Context, item store.Item, ev store.Even
 	})
 }
 
-// launchVerify は予算とリースを確認した上で verify を起動する（DESIGN.md 8.4 節）。
+// launchVerify は予算とリースを確認した上で verify を起動する。
 //
 // verify の実行も予算（CostUSD / Runs）に加算する。「1 アイテムに費やしてよい総額」を
 // 一本で管理する DESIGN.md 10章の思想を崩さないためであり、実装と検証が延々と往復した
@@ -338,9 +338,10 @@ func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, 
 	return e.applyOutcome(ctx, item, res)
 }
 
-// runVerify は verify セッションを起動し、判定を適用する（DESIGN.md 8.4 節）。
+// runVerify は verify セッションを起動し、判定を適用する。
 //
-// runAgent との違いは次の 2 点だけであり、いずれも verify の独立性を保つためである。
+// runAgent との違いは次の 2 点だけであり、いずれも verify を実装エージェントから
+// 独立させておくためである。
 //   - セッションを --resume しない。実装したエージェントの思考過程を引き継ぐと、
 //     自分の実装を自分でレビューする形に退化する
 //   - 返ってきた session_id を保存しない。verify は毎回まっさらな状態から検証する
@@ -471,12 +472,11 @@ func promptContext(item store.Item, ev store.Event, detail itemDetail, newSessio
 const verifyFailureNote = `verify が検証を行い、不合格と判断した。PR に投稿された verify のコメントを読み、
 指摘に対応すること。対応後に push すれば CI と verify が再度走る。`
 
-// applyVerifyOutcome は verify の判定を適用する（DESIGN.md 8.4 節）。
+// applyVerifyOutcome は verify の判定を適用する（DESIGN.md 8.3 節の outcome 表）。
 //
 // verify_failed 以外（verify_passed / verify_inconclusive）はいずれも ready に進める。
 // inconclusive を止めないのは、検証手段が無い・プレビューに到達できないといった
-// 「検証できなかった」を理由に PR を詰まらせないためである。これにより verify を
-// 有効化しても、導入前より悪くなることが構造的に起こらない。
+// 「検証できなかった」を理由に PR を詰まらせないためである。
 func (e *Engine) applyVerifyOutcome(ctx context.Context, item store.Item, res agentResult) error {
 	if res.Outcome != OutcomeVerifyFailed {
 		return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseReady)
