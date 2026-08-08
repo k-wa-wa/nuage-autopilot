@@ -32,7 +32,7 @@ CI が緑になった PR は、続けて **verify** が検証する。verify は
 
 ## 必要なもの
 
-- `claude` CLI が実行ユーザーで認証済みであること（`~/.claude` などの CLI 側の設定を使う）
+- 実装エージェント・verify それぞれが使う LLM CLI（`claude` / `agy`）がインストール・認証済みであること
 - `gh` CLI と `git`
 - リポジトリへの権限を持つ `GH_TOKEN`
 
