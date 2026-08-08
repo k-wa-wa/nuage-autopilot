@@ -320,12 +320,19 @@ webhook なら payload の `sender` を見れば済むが、`/notifications` は
 
 ### 7.4 CI の完了は notifications では取れない
 
-`check_suite` / `check_run` は notification に来ない。`phase = in_review` のアイテムに
-限って `GET /repos/{repo}/commits/{sha}/check-runs` を直接取得する。
+`check_suite` / `check_run` は notification に来ない。`phase = in_review` / `ready` の
+アイテムに限って `GET /repos/{repo}/commits/{sha}/check-runs` を直接取得する。
+`ready` を含めるのは、人間が `ready` の PR に追加 push して CI が落ちたときに
+`in_review` へ戻す経路（8.1 節）を成立させるためである。
 
 対象は通常 0〜2 件しかないため、コストは有界に収まる。確定した状態を `ci_success` /
 `ci_failure` として enqueue し、`dedup_key` に head_sha と状態を含めることで同じコミットの
 同じ結果が二重に積まれないようにする。前回状態を保持するカラムは持たない。
+
+Check Runs が 0 件（`none`）のリポジトリは CI 未設定と見なし、PR が `in_review` で
+スタックしないよう `ci_success` を積む。ただし push 直後は check run の登録が遅れて
+一時的に `none` に見えるため、`updated_at` から `checkRunsNoneGrace`（1 分）が経つまでは
+判断を次のポーリング周回に持ち越す（`Poll` は poller ループを止めてはならないので待たない）。
 
 ### 7.5 resync
 

@@ -5,12 +5,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"autopilot/internal/github"
 	"autopilot/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	// none の確定猶予（本番既定 1 分）を 0 にし、1 回の Poll で確定させる。猶予そのものの
+	// 検証は TestPoll_CheckRunsNoneWithinGraceIsDeferred が行う。
+	checkRunsNoneGrace = 0
+	os.Exit(m.Run())
+}
 
 func newTestPoller(t *testing.T, handler http.HandlerFunc, opts ...func(*Poller)) (*Poller, *store.Store) {
 	t.Helper()
@@ -486,6 +494,123 @@ func TestPollCheckRuns_EnqueuesOnceThenDedupsUntilShaChanges(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("enqueued (2nd) = %d, want 0 (dedup must suppress repeat)", n)
+	}
+}
+
+// TestPoll_CheckRunsNoneEnqueuesCiSuccess は、PR 向け CI が未設定のリポジトリにおいて
+// Check Runs が 0 件（none）の場合でも ci_success イベントが enqueue され、PR が
+// in_review でスタックすることなく自律的に verify へ進めることを検証する（DESIGN.md 7.4 節・8.4 節）。
+func TestPoll_CheckRunsNoneEnqueuesCiSuccess(t *testing.T) {
+	p, st := newTestPoller(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			writeJSON(w, `{"login": "nuage-autopilot"}`)
+		case r.URL.Path == "/notifications":
+			w.WriteHeader(http.StatusNotModified)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/commits/headsha123/check-runs":
+			writeJSON(w, `{"total_count": 0, "check_runs": []}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	ctx := context.Background()
+	item, _, err := st.UpsertItem(ctx, "k-wa-wa/pechka", 11, store.KindPullRequest)
+	if err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+	if err := st.UpdateItemPhase(ctx, item.ID, store.PhaseInReview); err != nil {
+		t.Fatalf("UpdateItemPhase: %v", err)
+	}
+	if err := st.UpdateItemHeadSHA(ctx, item.ID, "headsha123"); err != nil {
+		t.Fatalf("UpdateItemHeadSHA: %v", err)
+	}
+
+	n, err := p.Poll(ctx)
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("enqueued = %d, want 1", n)
+	}
+
+	ev, ok, err := st.NextUnprocessedEvent(ctx)
+	if err != nil || !ok {
+		t.Fatalf("NextUnprocessedEvent: ok=%v err=%v", ok, err)
+	}
+	if ev.Type != "ci_success" {
+		t.Fatalf("event type = %q, want ci_success", ev.Type)
+	}
+}
+
+// TestPoll_CheckRunsNoneWithinGraceIsDeferred は、push 直後の一時的な none
+// （check run が未登録）を ci_success と早合点しないことを検証する。猶予の内側では
+// 何も積まず、その間に CI が実際の結果を報告すればそちらが勝たなければならない。
+//
+// 判断を次周回に持ち越すだけで Poll 自身は待たないことも併せて確認する（猶予ぶんの
+// sleep が入ると、この 2 回の Poll は現実的な時間で終わらない）。
+func TestPoll_CheckRunsNoneWithinGraceIsDeferred(t *testing.T) {
+	checkRunsNoneGrace = time.Minute
+	t.Cleanup(func() { checkRunsNoneGrace = 0 })
+
+	calls := 0
+	p, st := newTestPoller(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			writeJSON(w, `{"login": "nuage-autopilot"}`)
+		case r.URL.Path == "/notifications":
+			w.WriteHeader(http.StatusNotModified)
+		case r.URL.Path == "/repos/k-wa-wa/pechka/commits/headsha456/check-runs":
+			calls++
+			if calls == 1 {
+				writeJSON(w, `{"total_count": 0, "check_runs": []}`)
+				return
+			}
+			writeJSON(w, `{"total_count": 1, "check_runs": [{"status": "completed", "conclusion": "failure"}]}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	ctx := context.Background()
+	item, _, err := st.UpsertItem(ctx, "k-wa-wa/pechka", 12, store.KindPullRequest)
+	if err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+	if err := st.UpdateItemPhase(ctx, item.ID, store.PhaseInReview); err != nil {
+		t.Fatalf("UpdateItemPhase: %v", err)
+	}
+	if err := st.UpdateItemHeadSHA(ctx, item.ID, "headsha456"); err != nil {
+		t.Fatalf("UpdateItemHeadSHA: %v", err)
+	}
+
+	// 1 周目: 猶予の内側なので、none を観測しても確定させない。
+	n, err := p.Poll(ctx)
+	if err != nil {
+		t.Fatalf("Poll() error = %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("enqueued (1st) = %d, want 0 (a none within the grace must not be confirmed)", n)
+	}
+	if _, ok, err := st.NextUnprocessedEvent(ctx); err != nil || ok {
+		t.Fatalf("no event must be enqueued while within the grace: ok=%v err=%v", ok, err)
+	}
+
+	// 2 周目: 実際の CI 結果（failure）が報告されたのでそれを積む。
+	n, err = p.Poll(ctx)
+	if err != nil {
+		t.Fatalf("Poll() (2nd) error = %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("enqueued (2nd) = %d, want 1", n)
+	}
+
+	ev, ok, err := st.NextUnprocessedEvent(ctx)
+	if err != nil || !ok {
+		t.Fatalf("NextUnprocessedEvent: ok=%v err=%v", ok, err)
+	}
+	if ev.Type != "ci_failure" {
+		t.Fatalf("event type = %q, want ci_failure (the real CI result must win over a transient none)", ev.Type)
 	}
 }
 
