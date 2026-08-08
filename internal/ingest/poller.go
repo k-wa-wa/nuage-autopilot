@@ -298,17 +298,31 @@ func (p *Poller) diffComments(ctx context.Context, item store.Item, kind store.K
 	return total, nil
 }
 
-// pollCheckRuns は phase=in_review のアイテムについて CI チェックランの状態を
+// checkRunsNoneGrace は Check Runs が 0 件（none）であることを「CI ワークフロー未設定」
+// と判断するまでの猶予である。push 直後は check run の登録が遅れることがあり、即断すると
+// CI 結果を待たずに ci_success を確定してしまう。基準には items.updated_at を使う
+// （head_sha の更新で必ず動くため）。
+var checkRunsNoneGrace = time.Minute
+
+// pollCheckRuns は phase=in_review / ready のアイテムについて CI チェックランの状態を
 // 取得し、成功・失敗が確定していれば ci_success/ci_failure イベントを enqueue
 // する（DESIGN.md 7.4 節）。
+//
+// ready も対象に含めるのは、人間が ready の PR に追加 push して CI が落ちた場合に
+// in_review へ戻す必要があるためである（8.1 節）。同じコミットの同じ結果は dedup_key で
+// 弾かれるので、in_review のうちに判定済みの sha を ready で見直しても何も起きない。
 //
 // dedup_key に head_sha と状態を含めることで、「同じコミットの同じ結果」を
 // 二重に enqueue することを防ぐ。新しいコミットが積まれれば head_sha が変わり、
 // 新しい判定が起こせる。専用のカラムで前回状態を保持する必要が無い。
 func (p *Poller) pollCheckRuns(ctx context.Context) (int, error) {
-	items, err := p.Store.ListItemsByPhase(ctx, store.PhaseInReview)
-	if err != nil {
-		return 0, fmt.Errorf("list in_review items: %w", err)
+	var items []store.Item
+	for _, phase := range []store.Phase{store.PhaseInReview, store.PhaseReady} {
+		got, err := p.Store.ListItemsByPhase(ctx, phase)
+		if err != nil {
+			return 0, fmt.Errorf("list %s items: %w", phase, err)
+		}
+		items = append(items, got...)
 	}
 
 	total := 0
@@ -322,9 +336,17 @@ func (p *Poller) pollCheckRuns(ctx context.Context) (int, error) {
 			continue
 		}
 
+		// push 直後で check run がまだ登録されていないだけの none を「CI 未設定」と
+		// 早合点しないよう、猶予が明けるまでは判断を次周回に委ねる。
+		if state == "none" && time.Since(it.UpdatedAt) < checkRunsNoneGrace {
+			continue
+		}
+
 		var eventType string
 		switch state {
-		case "success":
+		case "success", "none":
+			// 猶予を過ぎてなお none のリポジトリは CI 未設定と判断する。PR が in_review で
+			// スタックするのを防ぐため ci_success を積んで verify を起動する（7.4 節・8.4 節）。
 			eventType = "ci_success"
 		case "failure":
 			eventType = "ci_failure"
