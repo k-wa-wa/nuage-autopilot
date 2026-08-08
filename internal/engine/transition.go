@@ -13,9 +13,10 @@ const (
 	// エージェントは起動しない。
 	actionToDone action = "to_done"
 
-	// actionToReady は in_review + ci_success を受けて ready へ遷移することを表す。
-	// エージェントは起動しない（DESIGN.md 8.4 節: 将来ここに verify が入る）。
-	actionToReady action = "to_ready"
+	// actionLaunchVerify は in_review + ci_success を受けて verify を起動することを
+	// 表す（DESIGN.md 8.4 節）。ready へ進めるかどうかは verify の判定が決めるため、
+	// この時点では phase を動かさない。
+	actionLaunchVerify action = "launch_verify"
 
 	// actionLaunchNew は新規セッションでエージェントを起動することを表す。
 	actionLaunchNew action = "launch_new"
@@ -54,10 +55,13 @@ func nextAction(phase store.Phase, eventType string) action {
 
 	case store.PhaseInReview:
 		switch eventType {
-		case "ci_failure", "commented", "reviewed":
+		// verify_failure は verify の差し戻しを表す合成イベントである。人間の指摘
+		// （commented）とまったく同じ扱いで agent を起こす。差し戻し理由はイベントに
+		// 載せず、PR コメントとして GitHub 側に置く（DESIGN.md 8.2 節）。
+		case "ci_failure", "commented", "reviewed", "verify_failure":
 			return actionLaunchResume
 		case "ci_success":
-			return actionToReady
+			return actionLaunchVerify
 		}
 
 	case store.PhaseReady:

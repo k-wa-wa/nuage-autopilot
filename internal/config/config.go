@@ -6,7 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+
+	"autopilot/internal/agentcli"
 )
 
 // DefaultStateDir は --state-dir / NUAGE_STATE_DIR のいずれも指定されなかった場合の既定値である。
@@ -14,6 +17,19 @@ const DefaultStateDir = "./state"
 
 // DefaultAllowedAuthors は --allowed-authors / NUAGE_ALLOWED_AUTHORS のいずれも指定されなかった場合の既定値である。
 const DefaultAllowedAuthors = "k-wa-wa,bot-wa-wa"
+
+// CLISettings は 1 つの役割（実装 / verify）が使う LLM CLI の指定である。
+//
+// 指定するのは **CLI 名とモデルだけ**である。起動引数やプロンプトの渡し方は CLI ごとに
+// 異なるが、その知識は internal/agentcli の各クライアントが持つ（DESIGN.md 4章）。
+// 運用側が CLI ごとのフラグを覚える必要は無い。
+type CLISettings struct {
+	// Name は使用する CLI 名（"claude" / "agy"）。空の場合は既定の CLI を使う。
+	Name string
+
+	// Model は CLI に指定するモデル名。空の場合は CLI の既定モデルに任せる。
+	Model string
+}
 
 // Config は 1 回の起動で使用する設定値を保持する。
 type Config struct {
@@ -26,6 +42,12 @@ type Config struct {
 
 	// StateDir はリポジトリの clone やサイクルの作業状態を置くディレクトリである。
 	StateDir string
+
+	// AgentCLI / VerifyCLI は各役割が使う LLM CLI の指定である
+	// （--agent-cli / --agent-model / --verify-cli / --verify-model）。
+	// VerifyCLI が未指定の場合、engine 側で AgentCLI が使われる。
+	AgentCLI  CLISettings
+	VerifyCLI CLISettings
 
 	// ShowVersion が true の場合、呼び出し側はバージョンを表示して即座に終了する。
 	ShowVersion bool
@@ -59,6 +81,10 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("nuage-autopilot", flag.ContinueOnError)
 	reposStr := fs.String("repos", "", "巡回処理対象のリポジトリ一覧 (カンマ区切り、例: k-wa-wa/pechka,k-wa-wa/nuage-workspace)")
 	allowedAuthorsStr := fs.String("allowed-authors", resolveEnvOrDefault("NUAGE_ALLOWED_AUTHORS", DefaultAllowedAuthors), "候補対象とする Issue/PR の作成者一覧 (カンマ区切り)")
+	agentCLI := fs.String("agent-cli", "", "実装エージェントが使う LLM CLI ("+strings.Join(agentcli.Names(), " | ")+"。既定: "+agentcli.DefaultName+")")
+	agentModel := fs.String("agent-model", "", "実装エージェントのモデル名 (未指定なら CLI の既定モデル)")
+	verifyCLI := fs.String("verify-cli", "", "verify が使う LLM CLI (未指定なら実装エージェントと同じ)")
+	verifyModel := fs.String("verify-model", "", "verify のモデル名 (未指定なら実装エージェントと同じ)")
 	showVersion := fs.Bool("version", false, "バージョンを表示して終了する")
 
 	if err := fs.Parse(args); err != nil {
@@ -72,12 +98,20 @@ func Parse(args []string) (Config, error) {
 		Repos:          repos,
 		AllowedAuthors: allowedAuthors,
 		StateDir:       resolveStateDir(),
+		AgentCLI:       CLISettings{Name: *agentCLI, Model: *agentModel},
+		VerifyCLI:      CLISettings{Name: *verifyCLI, Model: *verifyModel},
 		ShowVersion:    *showVersion,
 	}
 
 	if !cfg.ShowVersion {
 		if len(cfg.Repos) == 0 {
 			return Config{}, ErrRepoRequired
+		}
+		// 綴り間違いを既定へ読み替えず、起動前に落とす。
+		for flagName, name := range map[string]string{"--agent-cli": cfg.AgentCLI.Name, "--verify-cli": cfg.VerifyCLI.Name} {
+			if name != "" && !slices.Contains(agentcli.Names(), name) {
+				return Config{}, fmt.Errorf("invalid %s %q: must be one of %s", flagName, name, strings.Join(agentcli.Names(), ", "))
+			}
 		}
 		for _, repo := range cfg.Repos {
 			parts := strings.Split(repo, "/")

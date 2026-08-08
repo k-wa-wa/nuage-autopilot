@@ -19,8 +19,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
+	"autopilot/internal/agentcli"
 	"autopilot/internal/config"
 	"autopilot/internal/daemon"
 	"autopilot/internal/engine"
@@ -41,7 +43,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	cfg, err := config.Parse(args)
 	if err != nil {
-		if errors.Is(err, config.ErrRepoRequired) {
+		if errors.Is(err, config.ErrRepoRequired) || strings.HasPrefix(err.Error(), "invalid ") {
 			fmt.Fprintln(stderr, err)
 			return 2
 		}
@@ -85,7 +87,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}()
 
 	logger.Info("nuage-autopilot starting",
-		"version", version, "repos", cfg.Repos, "state_dir", cfg.StateDir, "db_path", dbPath)
+		"version", version, "repos", cfg.Repos, "state_dir", cfg.StateDir, "db_path", dbPath,
+		"agent_cli", cfg.AgentCLI.Name, "agent_model", cfg.AgentCLI.Model,
+		"verify_cli", cfg.VerifyCLI.Name, "verify_model", cfg.VerifyCLI.Model)
 
 	client := github.NewClient(githubClientOptions()...)
 
@@ -106,12 +110,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Logger:         logger,
 	}
 
+	agentCLI, err := agentcli.New(cfg.AgentCLI.Name, agentcli.Options{Model: cfg.AgentCLI.Model, Logger: logger})
+	if err != nil {
+		logger.Error("failed to resolve the agent cli", "error", err.Error())
+		return 2
+	}
+	// verify 用が未指定なら実装側と同じ CLI を使う。
+	verifyCLI := agentCLI
+	if cfg.VerifyCLI.Name != "" || cfg.VerifyCLI.Model != "" {
+		verifyCLI, err = agentcli.New(cfg.VerifyCLI.Name, agentcli.Options{Model: cfg.VerifyCLI.Model, Logger: logger})
+		if err != nil {
+			logger.Error("failed to resolve the verify cli", "error", err.Error())
+			return 2
+		}
+	}
+
 	worker := engine.New(engine.Config{
-		Store:    st,
-		Client:   client,
-		StateDir: cfg.StateDir,
-		Repos:    cfg.Repos,
-		Logger:   logger,
+		Store:     st,
+		Client:    client,
+		StateDir:  cfg.StateDir,
+		Repos:     cfg.Repos,
+		AgentCLI:  agentCLI,
+		VerifyCLI: verifyCLI,
+		Logger:    logger,
 	})
 
 	if err := daemon.Run(ctx, daemon.Config{

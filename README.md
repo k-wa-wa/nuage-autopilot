@@ -25,9 +25,14 @@ claude を起動する。**イベントが無ければ LLM も GitHub API もほ
 `NUAGE_REPORT_FILE` に JSON で残す。Go 側はそれを見て状態を進めるだけで、何をするかは
 判断しない。詳細は [DESIGN.md](./DESIGN.md) を参照。
 
+CI が緑になった PR は、続けて **verify** が検証する。verify はコードを変更しない別セッションで、
+プレビュー環境を実際に叩いて要求どおり動いているかを確かめ、問題があれば PR にコメントして
+エージェントに差し戻す。何をもって合格とするかは、対象リポジトリの `.agents/autopilot-verify.md` に書く
+（無い場合、verify は判定を出さず PR をそのまま通す）。詳細は [DESIGN.md 8.4 節](./DESIGN.md)。
+
 ## 必要なもの
 
-- `claude` CLI が実行ユーザーで認証済みであること（`~/.claude` などの CLI 側の設定を使う）
+- 実装エージェント・verify それぞれが使う LLM CLI（`claude` / `agy`）がインストール・認証済みであること
 - `gh` CLI と `git`
 - リポジトリへの権限を持つ `GH_TOKEN`
 
@@ -56,6 +61,14 @@ nuage-autopilot --repos owner/repo-a,owner/repo-b
 
 `--repos` は必須である。ここに挙げたすべてのリポジトリが `NUAGE_STATE_DIR` 配下に clone され、
 エージェントの作業ディレクトリの兄弟として並ぶ。
+
+実装と verify で使う LLM CLI・モデルは役割ごとに指定できる。未指定なら claude を使い、
+verify は実装エージェントと同じ設定になる。
+
+```sh
+nuage-autopilot --repos owner/repo \
+  --verify-cli=agy --verify-model=gemini-3.1-pro-high
+```
 
 設定できる項目は [env.example](./env.example) に一覧がある。各項目の意味と既定値は
 [DESIGN.md 13章](./DESIGN.md) にまとめてある。

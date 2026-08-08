@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"autopilot/internal/agentcli"
 	"autopilot/internal/github"
 	"autopilot/internal/repo"
 	"autopilot/internal/store"
@@ -114,6 +115,17 @@ func testLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, nil))
 }
 
+// newFakeClaude はフェイクの実行ファイルを指す claude クライアントを作る。
+// 実際の claude へは到達しない。
+func newFakeClaude(t *testing.T, command string) agentcli.Client {
+	t.Helper()
+	cli, err := agentcli.New("claude", agentcli.Options{Command: command, Logger: testLogger(&bytes.Buffer{})})
+	if err != nil {
+		t.Fatalf("agentcli.New: %v", err)
+	}
+	return cli
+}
+
 type testHarness struct {
 	engine *Engine
 	store  *store.Store
@@ -145,7 +157,7 @@ func newTestEngine(t *testing.T, githubHandler http.HandlerFunc, claudePath stri
 		Client:       client,
 		StateDir:     t.TempDir(),
 		Repos:        []string{"k-wa-wa/pechka"},
-		AgentCommand: claudePath,
+		AgentCLI:     newFakeClaude(t, claudePath),
 		LeaseTTL:     time.Minute,
 		AgentTimeout: 10 * time.Second,
 		RepoOptions: []repo.Option{
@@ -548,37 +560,6 @@ func TestProcessNext_ClosedEventNeverLaunchesAgent(t *testing.T) {
 
 // TestProcessNext_CiSuccessMovesToReadyWithoutLaunchingAgent は in_review+ci_success
 // がエージェントを起動せず ready に遷移するだけであることを検証する
-// （DESIGN.md 8.4 節: verify はまだ実装しない）。
-func TestProcessNext_CiSuccessMovesToReadyWithoutLaunchingAgent(t *testing.T) {
-	h := newTestEngine(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected GitHub request (agent should not be launched): %s %s", r.Method, r.URL.Path)
-	}, "/nonexistent/claude-must-not-be-invoked")
-	ctx := context.Background()
-
-	item, _, err := h.store.UpsertItem(ctx, "k-wa-wa/pechka", 1, store.KindPullRequest)
-	if err != nil {
-		t.Fatalf("UpsertItem: %v", err)
-	}
-	if err := h.store.UpdateItemPhase(ctx, item.ID, store.PhaseInReview); err != nil {
-		t.Fatalf("UpdateItemPhase: %v", err)
-	}
-	if _, _, err := h.store.EnqueueEvent(ctx, "checkrun:1", item.ID, "ci_success", "github", "", time.Now()); err != nil {
-		t.Fatalf("EnqueueEvent: %v", err)
-	}
-
-	if _, err := h.engine.ProcessNext(ctx); err != nil {
-		t.Fatalf("ProcessNext() error = %v", err)
-	}
-
-	reloaded, ok, err := h.store.GetItemByID(ctx, item.ID)
-	if err != nil || !ok {
-		t.Fatalf("GetItemByID: ok=%v err=%v", ok, err)
-	}
-	if reloaded.Phase != store.PhaseReady {
-		t.Fatalf("Phase = %q, want %q", reloaded.Phase, store.PhaseReady)
-	}
-}
-
 // TestProcessNext_BudgetExceededBlocksWithoutLaunchingAgent は予算上限に達した
 // アイテムがエージェントを起動せず blocked になり、GitHub にコメントが
 // 投稿されることを検証する（DESIGN.md 10章）。

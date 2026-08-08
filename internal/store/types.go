@@ -30,9 +30,8 @@ const (
 	// PhaseInReview は PR が存在し、CI・検証・修正を反復している状態を表す。
 	PhaseInReview Phase = "in_review"
 
-	// PhaseReady は実装が済み CI も緑で、人間のマージを待っている状態を表す。
-	// 将来 verify を追加した場合、verify 合格もこの phase への遷移条件に加わる
-	// （DESIGN.md 8.4 節）。
+	// PhaseReady は CI が緑で、verify も PR を止めなかった状態を表す。
+	// 待っているのは人間のマージである（DESIGN.md 6.2 節）。
 	PhaseReady Phase = "ready"
 
 	// PhaseBlocked は人間の判断が必要で中断していることを表す。
