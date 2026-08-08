@@ -57,7 +57,7 @@ func TestRun_SuccessExitZero(t *testing.T) {
 	result, err := Run(context.Background(), Options{
 		Command: fakeClaude,
 		WorkDir: workDir,
-		Prompt:  "とても長い秘密の指示文プロンプト",
+		Stdin:   "とても長い秘密の指示文プロンプト",
 		Logger:  testLoggerTo(&logBuf),
 	})
 	if err != nil {
@@ -100,86 +100,64 @@ func TestRun_SuccessExitZero(t *testing.T) {
 	}
 }
 
-// writeArgEchoingFakeClaude はテスト用のフェイク claude 実行ファイルを書き出す。
-// 受け取った引数をそのまま1行ずつ標準出力に書き出して終了する。
-// Options.Model / Options.ExtraArgs が実際のコマンドライン引数として渡っていることを
-// 検証するために使う。
+// writeArgEchoingFakeClaude はテスト用のフェイク CLI 実行ファイルを書き出す。
+// 受け取った引数をそのまま 1 行ずつ標準出力に書き出して終了する。
+// Options.Args が実際のコマンドライン引数として渡っていることを検証するために使う。
 func writeArgEchoingFakeClaude(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skip("fake claude script assumes a POSIX shell")
+		t.Skip("fake cli script assumes a POSIX shell")
 	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "claude")
+	path := filepath.Join(dir, "cli")
 	script := "#!/bin/sh\ncat > /dev/null\nfor a in \"$@\"; do echo \"$a\"; done\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake claude script: %v", err)
+		t.Fatalf("write fake cli script: %v", err)
 	}
 	return path
 }
 
-func TestRun_PassesModelAndExtraArgs(t *testing.T) {
-	fakeClaude := writeArgEchoingFakeClaude(t)
+// TestRun_PassesArgsVerbatim は Options.Args がそのままコマンドライン引数として渡ることを
+// 検証する。どんな引数を組み立てるかは internal/agentcli の各クライアントの責務であり、
+// このパッケージは受け取ったものをそのまま渡すだけである。
+func TestRun_PassesArgsVerbatim(t *testing.T) {
+	fakeCLI := writeArgEchoingFakeClaude(t)
 
 	result, err := Run(context.Background(), Options{
-		Command:   fakeClaude,
-		WorkDir:   t.TempDir(),
-		Prompt:    "x",
-		Model:     "claude-haiku-4-5-20251001",
-		ExtraArgs: []string{"--output-format", "json"},
+		Command: fakeCLI,
+		Args:    []string{"-p", "--output-format=json", "--model=some-model", "位置引数のプロンプト"},
+		WorkDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !result.Success {
-		t.Fatalf("result.Success = false, want true")
-	}
-
-	for _, want := range []string{"--model", "claude-haiku-4-5-20251001", "--output-format", "json"} {
+	for _, want := range []string{"-p", "--output-format=json", "--model=some-model", "位置引数のプロンプト"} {
 		if !strings.Contains(result.Stdout, want) {
-			t.Fatalf("result.Stdout = %q, want it to contain %q (args echoed by fake claude)", result.Stdout, want)
+			t.Fatalf("arg %q was not passed: %q", want, result.Stdout)
 		}
 	}
 }
 
-func TestRun_PassesExtraEnv(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\ncat > /dev/null\necho \"NUAGE_REPORT_FILE=$NUAGE_REPORT_FILE\"\n"
-	if runtime.GOOS == "windows" {
-		t.Skip("fake claude script assumes a POSIX shell")
-	}
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake claude script: %v", err)
-	}
+// TestRun_OmitsStdinWhenEmpty は Stdin が空のとき標準入力を接続しないことを検証する。
+// 標準入力からプロンプトを読まない CLI（agy 等）のための経路である。
+func TestRun_OmitsStdinWhenEmpty(t *testing.T) {
+	stdinLog := filepath.Join(t.TempDir(), "stdin.txt")
+	fakeCLI := writeFakeClaude(t, 0, stdinLog)
 
-	result, err := Run(context.Background(), Options{
-		Command:  path,
-		WorkDir:  t.TempDir(),
-		Prompt:   "x",
-		ExtraEnv: []string{"NUAGE_REPORT_FILE=/tmp/report.json"},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if !strings.Contains(result.Stdout, "NUAGE_REPORT_FILE=/tmp/report.json") {
-		t.Fatalf("result.Stdout = %q, want it to contain the extra env var", result.Stdout)
-	}
-}
-
-func TestRun_OmitsModelFlagWhenEmpty(t *testing.T) {
-	fakeClaude := writeArgEchoingFakeClaude(t)
-
-	result, err := Run(context.Background(), Options{
-		Command: fakeClaude,
+	if _, err := Run(context.Background(), Options{
+		Command: fakeCLI,
+		Args:    []string{"-p"},
 		WorkDir: t.TempDir(),
-		Prompt:  "x",
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if strings.Contains(result.Stdout, "--model") {
-		t.Fatalf("result.Stdout = %q, must not contain --model when Options.Model is empty", result.Stdout)
+
+	got, err := os.ReadFile(stdinLog)
+	if err != nil {
+		t.Fatalf("read stdin log: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("stdin should be empty, got %q", got)
 	}
 }
 
@@ -191,7 +169,7 @@ func TestRun_NonZeroExitIsNotAnError(t *testing.T) {
 	result, err := Run(context.Background(), Options{
 		Command: fakeClaude,
 		WorkDir: workDir,
-		Prompt:  "fail please",
+		Stdin:   "fail please",
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil (non-zero exit must not be a Go error)", err)
@@ -205,7 +183,7 @@ func TestRun_NonZeroExitIsNotAnError(t *testing.T) {
 }
 
 func TestRun_RequiresWorkDir(t *testing.T) {
-	_, err := Run(context.Background(), Options{Prompt: "x"})
+	_, err := Run(context.Background(), Options{Stdin: "x"})
 	if err == nil {
 		t.Fatalf("Run() error = nil, want an error when WorkDir is empty")
 	}
@@ -215,7 +193,7 @@ func TestRun_CommandNotFoundReturnsError(t *testing.T) {
 	_, err := Run(context.Background(), Options{
 		Command: filepath.Join(t.TempDir(), "does-not-exist"),
 		WorkDir: t.TempDir(),
-		Prompt:  "x",
+		Stdin:   "x",
 	})
 	if err == nil {
 		t.Fatalf("Run() error = nil, want an error when the executable does not exist")
@@ -240,7 +218,7 @@ func TestRun_ContextCancellationStopsTheProcess(t *testing.T) {
 	_, _ = Run(ctx, Options{
 		Command: path,
 		WorkDir: t.TempDir(),
-		Prompt:  "x",
+		Stdin:   "x",
 	})
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("Run() took %v, want it to return promptly after context cancellation", elapsed)

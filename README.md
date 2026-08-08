@@ -62,6 +62,14 @@ nuage-autopilot --repos owner/repo-a,owner/repo-b
 `--repos` は必須である。ここに挙げたすべてのリポジトリが `NUAGE_STATE_DIR` 配下に clone され、
 エージェントの作業ディレクトリの兄弟として並ぶ。
 
+実装と verify で使う LLM CLI・モデルは役割ごとに指定できる。未指定なら claude を使い、
+verify は実装エージェントと同じ設定になる。
+
+```sh
+nuage-autopilot --repos owner/repo \
+  --verify-cli=agy --verify-model=gemini-3.1-pro-high
+```
+
 設定できる項目は [env.example](./env.example) に一覧がある。各項目の意味と既定値は
 [DESIGN.md 13章](./DESIGN.md) にまとめてある。
 

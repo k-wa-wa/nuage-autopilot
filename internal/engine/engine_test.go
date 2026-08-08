@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"autopilot/internal/agentcli"
 	"autopilot/internal/github"
 	"autopilot/internal/repo"
 	"autopilot/internal/store"
@@ -114,6 +115,17 @@ func testLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, nil))
 }
 
+// newFakeClaude はフェイクの実行ファイルを指す claude クライアントを作る。
+// 実際の claude へは到達しない。
+func newFakeClaude(t *testing.T, command string) agentcli.Client {
+	t.Helper()
+	cli, err := agentcli.New("claude", agentcli.Options{Command: command, Logger: testLogger(&bytes.Buffer{})})
+	if err != nil {
+		t.Fatalf("agentcli.New: %v", err)
+	}
+	return cli
+}
+
 type testHarness struct {
 	engine *Engine
 	store  *store.Store
@@ -145,7 +157,7 @@ func newTestEngine(t *testing.T, githubHandler http.HandlerFunc, claudePath stri
 		Client:       client,
 		StateDir:     t.TempDir(),
 		Repos:        []string{"k-wa-wa/pechka"},
-		AgentCommand: claudePath,
+		AgentCLI:     newFakeClaude(t, claudePath),
 		LeaseTTL:     time.Minute,
 		AgentTimeout: 10 * time.Second,
 		RepoOptions: []repo.Option{

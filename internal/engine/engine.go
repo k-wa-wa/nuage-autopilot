@@ -1,5 +1,5 @@
 // Package engine は internal/store の未処理イベントを 1 件ずつ取り出し、
-// 遷移表（transition.go）に従ってエージェント（claude）を起動する
+// 遷移表（transition.go）に従って LLM CLI を起動する
 // （DESIGN.md 8章）。internal/daemon.Worker を実装する。
 //
 // Go が決めるのは「起こすか否か」だけである。何をするかはエージェント自身が
@@ -16,11 +16,11 @@ import (
 	"os"
 	"time"
 
+	"autopilot/internal/agentcli"
 	"autopilot/internal/daemon"
 	"autopilot/internal/github"
 	"autopilot/internal/prompt"
 	"autopilot/internal/repo"
-	"autopilot/internal/runner"
 	"autopilot/internal/store"
 )
 
@@ -75,9 +75,11 @@ type Config struct {
 	MaxCostUSD float64
 	MaxRuns    int
 
-	// AgentCommand は claude の実行ファイル名/パスの上書きである。空の場合
-	// internal/runner の既定（"claude"）を使う。テスト用。
-	AgentCommand string
+	// AgentCLI / VerifyCLI は各役割が使う LLM CLI である。実装と検証で別の CLI・
+	// 別のモデルを使えるように分けてある（DESIGN.md 4章）。
+	// VerifyCLI が nil の場合は AgentCLI をそのまま使う。
+	AgentCLI  agentcli.Client
+	VerifyCLI agentcli.Client
 
 	// RepoOptions は internal/repo.EnsureWorkspace にそのまま渡す追加オプションである。
 	// 本番では空でよい（既定の GitHub リモート・git/gh コマンドを使う）。テストで
@@ -110,6 +112,10 @@ func (c Config) withDefaults() Config {
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	// verify 用の CLI が指定されていなければ実装側と同じものを使う。
+	if c.VerifyCLI == nil {
+		c.VerifyCLI = c.AgentCLI
+	}
 	return c
 }
 
@@ -130,7 +136,7 @@ func (e *Engine) logger() *slog.Logger { return e.cfg.Logger }
 // ProcessNext は internal/daemon.Worker の実装である。未処理イベントを高々 1 件
 // 処理する。
 //
-// イベントの処理中に発生したエラー（GitHub 呼び出し失敗、claude の起動失敗等）は
+// イベントの処理中に発生したエラー（GitHub 呼び出し失敗、CLI の起動失敗等）は
 // 可能な限り handle 内部で吸収し、"blocked" コメントの投稿と phase=blocked への
 // 遷移という形で GitHub 側に記録する。ここで拾うのは、その吸収すら失敗した
 // 場合のログ用途であり、いずれにせよイベントは処理済みにする。1 件のイベントに
@@ -308,7 +314,7 @@ func (e *Engine) withBudgetAndLease(ctx context.Context, item store.Item, ev sto
 	return fn(runCtx, item)
 }
 
-// runAgent は実際に claude を起動し、結果を適用する。
+// runAgent は実装エージェントを起動し、結果を適用する。
 func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, newSession bool) error {
 	detail, err := fetchDetail(ctx, e.cfg.Client, item.Repo, item.Kind, item.Number)
 	if err != nil {
@@ -317,14 +323,14 @@ func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, 
 
 	promptText := prompt.BuildAgent(promptContext(item, ev, detail, newSession))
 
-	run, err := e.runClaude(ctx, item, promptText, item.SessionID)
+	run, err := e.runCLI(ctx, item, e.cfg.AgentCLI, promptText, item.SessionID)
 	if err != nil {
 		return e.reportBlocked(ctx, item, fmt.Sprintf("エージェントの実行に失敗した: %s", err.Error()))
 	}
 	defer run.cleanup()
 
-	if run.meta.SessionID != "" && run.meta.SessionID != item.SessionID {
-		if err := e.cfg.Store.UpdateItemSessionID(ctx, item.ID, run.meta.SessionID); err != nil {
+	if run.result.SessionID != "" && run.result.SessionID != item.SessionID {
+		if err := e.cfg.Store.UpdateItemSessionID(ctx, item.ID, run.result.SessionID); err != nil {
 			e.logger().Error("failed to persist session id", "repo", item.Repo, "number", item.Number, "error", err.Error())
 		}
 	}
@@ -332,7 +338,7 @@ func (e *Engine) runAgent(ctx context.Context, item store.Item, ev store.Event, 
 	res, readErr := readAgentResult(run.reportPath)
 	if readErr != nil {
 		return e.reportBlocked(ctx, item, fmt.Sprintf("エージェントが有効な結果を報告しなかった（exit_code=%d, 読み取りエラー: %s）",
-			run.exitCode, readErr.Error()))
+			run.result.ExitCode, readErr.Error()))
 	}
 
 	return e.applyOutcome(ctx, item, res)
@@ -353,7 +359,7 @@ func (e *Engine) runVerify(ctx context.Context, item store.Item, ev store.Event)
 
 	promptText := prompt.BuildVerify(promptContext(item, ev, detail, true))
 
-	run, err := e.runClaude(ctx, item, promptText, "")
+	run, err := e.runCLI(ctx, item, e.cfg.VerifyCLI, promptText, "")
 	if err != nil {
 		return e.reportVerifyUnavailable(ctx, item, fmt.Sprintf("verify を起動できなかった: %s", err.Error()))
 	}
@@ -362,7 +368,7 @@ func (e *Engine) runVerify(ctx context.Context, item store.Item, ev store.Event)
 	res, readErr := readVerifyResult(run.reportPath)
 	if readErr != nil {
 		return e.reportVerifyUnavailable(ctx, item, fmt.Sprintf("verify が有効な結果を報告しなかった（exit_code=%d, 読み取りエラー: %s）",
-			run.exitCode, readErr.Error()))
+			run.result.ExitCode, readErr.Error()))
 	}
 
 	return e.applyVerifyOutcome(ctx, item, res)
@@ -387,64 +393,53 @@ func (e *Engine) reportVerifyUnavailable(ctx context.Context, item store.Item, m
 	return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseReady)
 }
 
-// claudeRun は claude 1 回の実行結果である。reportPath の後始末は cleanup が行う。
-type claudeRun struct {
-	meta       claudeMeta
+// cliRun は CLI 1 回の実行結果と、後始末である。
+type cliRun struct {
+	result     agentcli.Result
 	reportPath string
-	exitCode   int
 	cleanup    func()
 }
 
-// runClaude は agent と verify に共通する起動手順（作業ディレクトリの用意 →
-// report ファイルの作成 → claude の起動 → 実測コストの計上）をまとめたものである。
+// runCLI は agent と verify に共通する起動手順（作業ディレクトリの用意 →
+// report ファイルの作成 → CLI の起動 → 実測コストの計上）をまとめたものである。
 //
-// この関数はモードを知らない。モードによる差はプロンプトと resumeSessionID の
-// 有無だけであり、それらは呼び出し側が決める（DESIGN.md 8.4 節）。
-func (e *Engine) runClaude(ctx context.Context, item store.Item, promptText, resumeSessionID string) (claudeRun, error) {
+// この関数は役割も CLI の種類も知らない。差はプロンプト・使う Client・resumeID の
+// 有無だけであり、それらは呼び出し側が決める。
+func (e *Engine) runCLI(ctx context.Context, item store.Item, cli agentcli.Client, promptText, resumeID string) (cliRun, error) {
 	workDir, err := repo.EnsureWorkspace(ctx, e.logger(), e.cfg.StateDir, item.Repo, e.cfg.Repos, e.cfg.RepoOptions...)
 	if err != nil {
-		return claudeRun{}, fmt.Errorf("作業ディレクトリの準備: %w", err)
+		return cliRun{}, fmt.Errorf("作業ディレクトリの準備: %w", err)
 	}
 
 	reportFile, err := os.CreateTemp(e.cfg.StateDir, "nuage-report-*.json")
 	if err != nil {
-		return claudeRun{}, fmt.Errorf("create report file: %w", err)
+		return cliRun{}, fmt.Errorf("create report file: %w", err)
 	}
 	reportPath := reportFile.Name()
 	_ = reportFile.Close()
 	cleanup := func() { os.Remove(reportPath) }
 
-	opts := runner.Options{
-		Command:   e.cfg.AgentCommand,
-		WorkDir:   workDir,
-		Prompt:    promptText,
-		ExtraArgs: []string{"--output-format", "json"},
-		ExtraEnv:  []string{"NUAGE_REPORT_FILE=" + reportPath},
-		Logger:    e.logger(),
-	}
-	if resumeSessionID != "" {
-		opts.ExtraArgs = append(opts.ExtraArgs, "--resume", resumeSessionID)
-	}
-
-	result, runErr := runner.Run(ctx, opts)
+	res, runErr := cli.Run(ctx, agentcli.Request{
+		WorkDir:  workDir,
+		Prompt:   promptText,
+		ResumeID: resumeID,
+		Env:      []string{"NUAGE_REPORT_FILE=" + reportPath},
+	})
 	if runErr != nil {
 		cleanup()
-		return claudeRun{}, fmt.Errorf("claude の起動: %w", runErr)
+		return cliRun{}, fmt.Errorf("%s の起動: %w", cli.Name(), runErr)
 	}
 
-	meta, metaErr := parseClaudeMeta(result.Stdout)
-	if metaErr != nil {
-		// --output-format json を指定している以上、通常はここに来ない。
-		// コスト計上・セッション継続ができないだけで実行自体は成功しているため、
-		// ログに残して処理は続ける。
-		e.logger().Warn("failed to parse claude's json output; cost and session id were not recorded",
-			"repo", item.Repo, "number", item.Number, "error", metaErr.Error())
-	}
-	if err := e.cfg.Store.AddItemUsage(ctx, item.ID, meta.TotalCostUSD); err != nil {
+	if res.CostUSD == nil {
+		// 金額を返さない CLI がある。実行回数（MaxRuns）だけが歯止めになる
+		// （DESIGN.md 10章）。
+		e.logger().Warn("cli did not report a cost; only the run count limits this item",
+			"cli", cli.Name(), "repo", item.Repo, "number", item.Number)
+	} else if err := e.cfg.Store.AddItemUsage(ctx, item.ID, *res.CostUSD); err != nil {
 		e.logger().Error("failed to record usage", "repo", item.Repo, "number", item.Number, "error", err.Error())
 	}
 
-	return claudeRun{meta: meta, reportPath: reportPath, exitCode: result.ExitCode, cleanup: cleanup}, nil
+	return cliRun{result: res, reportPath: reportPath, cleanup: cleanup}, nil
 }
 
 // promptContext は agent / verify 共通のプロンプト入力を組み立てる。
@@ -539,7 +534,7 @@ func (e *Engine) applySplit(ctx context.Context, item store.Item, children []int
 	return e.cfg.Store.UpdateItemPhase(ctx, item.ID, store.PhaseDelegated)
 }
 
-// reportBlocked は claude 自体を起動できなかった、または有効な結果を確定できな
+// reportBlocked は CLI 自体を起動できなかった、または有効な結果を確定できな
 // かった場合の共通処理である。GitHub にその旨を投稿し、phase=blocked にする。
 // これはエージェントの無言終了に対する唯一の保険であり、通常運転で Go が
 // GitHub に書き込むことはない（DESIGN.md 8.3 節）。

@@ -76,3 +76,34 @@ func TestMissingEnv_EmptyWhenAllSet(t *testing.T) {
 		t.Fatalf("すべて設定済みのときは nil を返すべきである: got %v", missing)
 	}
 }
+
+// TestParse_CLISettingsPerRole は役割ごとに CLI とモデルを引数で指定できることを
+// 検証する（DESIGN.md 4章・13章）。verify だけ別 CLI に向ける運用を想定している。
+func TestParse_CLISettingsPerRole(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--repos", "k-wa-wa/pechka",
+		"--verify-cli=agy",
+		"--verify-model=gemini-3.1-pro-high",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.VerifyCLI.Name != "agy" || cfg.VerifyCLI.Model != "gemini-3.1-pro-high" {
+		t.Fatalf("VerifyCLI = %+v", cfg.VerifyCLI)
+	}
+	// 実装側は未指定なら空のまま。engine 側で既定の CLI が使われる。
+	if cfg.AgentCLI.Name != "" {
+		t.Fatalf("AgentCLI.Name = %q, want empty", cfg.AgentCLI.Name)
+	}
+}
+
+// TestParse_RejectsUnknownCLIName は綴り間違いを既定へ読み替えず起動前に落とすことを
+// 検証する。黙って別の CLI が使われる事故を防ぐための性質である。
+func TestParse_RejectsUnknownCLIName(t *testing.T) {
+	if _, err := Parse([]string{"--repos", "k-wa-wa/pechka", "--verify-cli=gpt"}); err == nil {
+		t.Fatal("Parse() error = nil, want an error for an unknown --verify-cli")
+	}
+	if _, err := Parse([]string{"--repos", "k-wa-wa/pechka", "--agent-cli=claude"}); err != nil {
+		t.Fatalf("Parse() with a known cli name failed: %v", err)
+	}
+}

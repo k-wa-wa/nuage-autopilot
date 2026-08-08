@@ -75,24 +75,3 @@ func readResult(path string, valid map[string]bool) (agentResult, error) {
 }
 
 var errInvalidOutcome = errors.New("invalid outcome")
-
-// claudeMeta は claude --output-format json の応答ラッパのうち、
-// internal/engine が必要とするフィールドだけを抜き出したものである
-// （DESIGN.md 8.6 節: セッション継続、10章: 実測コストの累積）。
-type claudeMeta struct {
-	SessionID    string  `json:"session_id"`
-	TotalCostUSD float64 `json:"total_cost_usd"`
-}
-
-// parseClaudeMeta は claude の標準出力（JSON 1 件）から session_id と
-// total_cost_usd を抜き出す。--output-format json を指定している限り stdout は
-// この JSON 1 件のみのはずである。パースに失敗した場合はゼロ値と err を返す。
-// 呼び出し元はこれを致命的エラーとはせず、「コスト計上・セッション継続ができ
-// なかった」以上の意味を持たせずに処理を続行してよい。
-func parseClaudeMeta(stdout string) (claudeMeta, error) {
-	var meta claudeMeta
-	if err := json.Unmarshal([]byte(stdout), &meta); err != nil {
-		return claudeMeta{}, fmt.Errorf("decode claude stdout as json: %w", err)
-	}
-	return meta, nil
-}
