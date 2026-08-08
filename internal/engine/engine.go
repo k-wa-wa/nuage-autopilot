@@ -450,6 +450,7 @@ func promptContext(item store.Item, ev store.Event, detail itemDetail, newSessio
 		Number:   item.Number,
 		Title:    detail.Title,
 		Body:     detail.Body,
+		HeadSHA:  item.HeadSHA,
 		Event: prompt.EventInfo{
 			Type:      ev.Type,
 			Actor:     ev.Actor,

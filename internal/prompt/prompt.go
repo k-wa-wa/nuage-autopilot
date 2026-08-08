@@ -51,6 +51,14 @@ type Context struct {
 	Title    string
 	Body     string
 
+	// HeadSHA は PR の先頭コミットである（Issue の場合は空）。
+	//
+	// 検証対象の同一性を示すために渡す。検証している成果物が本当にこのコミットの
+	// ものかを確かめられないと、verify は古いものを検証したまま合格を返してしまう。
+	// 「何を検証対象とし、どう確かめるか」はリポジトリ側の VerifyGuideFile が
+	// 持つが、「何と照合するか」は GitHub 共通の情報なのでここで渡す。
+	HeadSHA string
+
 	// Event は今回の起動理由となったイベントである。
 	Event EventInfo
 
@@ -120,16 +128,29 @@ JSON を書き出すこと。
 - 無言終了（この JSON を書かずに終了すること）は絶対に避けること。判断がつかない場合は
   outcome="blocked" として理由をコメントに書くこと`
 
+// VerifyGuideFile は、対象リポジトリが検証手順を書くファイルの名前である。
+//
+// リポジトリ側との契約であり、変えると全リポジトリの追従が必要になるため、
+// プロンプト中に直接書かず必ずこの定数を経由する。
+const VerifyGuideFile = ".agents/autopilot-verify.md"
+
+// verifyGuide はプロンプト中でファイル名をコード表記するための断片である。
+const verifyGuide = "`" + VerifyGuideFile + "`"
+
 // verifyRulesNote は検証手順の所在をエージェントに教える一文である。
 //
 // 「何をもって合格とするか」はリポジトリごとに異なるため、その知識を Go 側の設定に
 // 持たせず、リポジトリ内のファイルに置く（DESIGN.md 8.4 節）。これにより対象
-// リポジトリが増えても autopilot 側の変更が不要になり、`.agents/verify.md` を
-// 用意したリポジトリから順に検証が実質的に効き始める。
-const verifyRulesNote = `対象リポジトリのルート直下に ` + "`AGENTS.md`" + ` と ` + "`.agents/verify.md`" + ` が存在する場合、
-検証に着手する前に必ず両方を読み込むこと。` + "`.agents/verify.md`" + ` には、そのリポジトリ固有の
-検証手順（プレビュー環境の URL、実行してよい検証コマンド、確認すべきレポートの場所、
-そのリポジトリ固有のレビュー基準、検証対象外とするもの）が書かれている。`
+// リポジトリが増えても autopilot 側の変更が不要になり、VerifyGuideFile を用意した
+// リポジトリから順に検証が実質的に効き始める。
+const verifyRulesNote = `対象リポジトリに ` + "`AGENTS.md`" + `（ルート直下）と ` + verifyGuide + ` が
+存在する場合、検証に着手する前に必ず両方を読み込むこと。` + verifyGuide + ` には、そのリポジトリ固有の
+検証手順（検証対象の所在、それが対象コミットに対応しているかの確かめ方、実行してよい
+検証コマンド、確認すべきレポートの場所、そのリポジトリ固有のレビュー基準、検証対象外と
+するもの）が書かれている。
+
+このファイルが無い、あるいは検証手段が書かれていないリポジトリでは、無理に検証手段を
+探さないこと。その場合は outcome="verify_inconclusive" を返してよい。`
 
 // verifyExecutionModel は verify の実行前提である。
 const verifyExecutionModel = `## 実行モデル（非対話・無人実行）
@@ -151,8 +172,10 @@ const verifyExecutionModel = `## 実行モデル（非対話・無人実行）
 const verifyTaskNote = `## 検証の観点
 1. **要求充足**: 元の要求に書かれたことを実際に満たしているか（diff が要求と対応しているか）。
    PR が Issue に紐づいている場合は、gh でその Issue を読み、受け入れ条件を確認すること。
-2. **動作**: ` + "`.agents/verify.md`" + ` に書かれた手順に従い、プレビュー環境で実際に動作するか。
-3. **コードレビュー**: ` + "`AGENTS.md`" + ` や ` + "`.agents/verify.md`" + ` に明文化された規約からの逸脱、
+2. **動作**: ` + verifyGuide + ` に書かれた手順に従い、変更が実際に動作するか。
+   検証対象となる環境や成果物がある場合は、検証に入る前に **それが「対象コミット」に
+   対応していること**を確かめること。確かめ方は ` + verifyGuide + ` に書かれている。
+3. **コードレビュー**: ` + "`AGENTS.md`" + ` や ` + verifyGuide + ` に明文化された規約からの逸脱、
    バグ・セキュリティ・データ破壊につながる欠陥、既存機能の退行が無いか。
 
 ## 差し戻してよい範囲
@@ -164,16 +187,19 @@ const verifyTaskNote = `## 検証の観点
   リポジトリに書かれていない基準を持ち出して差し戻さないこと。
 - gofmt・lint・テストのように CI が機械的に判定できるものは CI の責務である。
   CI が緑である以上、ここで重ねて指摘しない。
-- **判断がつかない場合、不合格にしてはならない。** 検証手段が無い、プレビュー環境に
-  到達できない、情報が足りない等で判定できない場合は、必ず outcome="verify_inconclusive"
+- **検証対象が対象コミットより古い場合も差し戻してはならない。** これは実装の不備では
+  なく反映待ちであり、エージェントには直しようがない。この場合も
+  outcome="verify_inconclusive" を返し、実際に確認できたコミットをコメントに残すこと。
+- **判断がつかない場合、不合格にしてはならない。** 検証手段が無い、検証対象に到達
+  できない、情報が足りない等で判定できない場合は、必ず outcome="verify_inconclusive"
   を返すこと。「検証して落ちた」と「検証できなかった」は明確に別物として扱う。`
 
 // verifyFreedoms は verify に許可されている操作である。
 const verifyFreedoms = `## 許可されている操作
 - リポジトリの読み取り、git diff の確認
 - gh によるリポジトリ・Issue・PR・CI 結果の読み取り
-- ` + "`.agents/verify.md`" + ` に書かれた検証コマンドの実行
-- プレビュー環境への HTTP アクセス
+- ` + verifyGuide + ` に書かれた検証コマンドの実行
+- 検証対象への HTTP アクセス
 - gh pr comment による PR へのコメント投稿（1 件。判定の理由と、レビューで気づいた点）`
 
 // verifyProhibitions は verify が理由の如何を問わず実行してはならない操作である。
@@ -216,7 +242,11 @@ func contextSection(ctx Context) string {
 	b.WriteString("## 対象\n")
 	fmt.Fprintf(&b, "リポジトリ: %s\n", ctx.RepoName)
 	fmt.Fprintf(&b, "種別・番号: %s #%d\n", ctx.Kind, ctx.Number)
-	fmt.Fprintf(&b, "タイトル: %s\n\n", ctx.Title)
+	fmt.Fprintf(&b, "タイトル: %s\n", ctx.Title)
+	if ctx.HeadSHA != "" {
+		fmt.Fprintf(&b, "対象コミット (head_sha): %s\n", ctx.HeadSHA)
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## 本文\n")
 	if ctx.Body == "" {
